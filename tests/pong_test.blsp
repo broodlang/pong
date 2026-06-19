@@ -1,0 +1,484 @@
+;; Tests for the pure game logic of `pong`. The GUI loop (`run`/`loop`) isn't
+;; covered here — `nest test` only exercises pure functions; the window is
+;; verified by a bounded `nest run --for`.
+(defmodule pong-test (:use pong) (:use test))
+
+(describe "geometry"
+  (test "paddle-h is a fraction of the court, floored"
+    (is (= (paddle-h 100) (round (* 100 *paddle-frac*)))))
+  (test "paddle-h never drops below the minimum"
+    (is (= (paddle-h 2) *paddle-min-h*)))
+  (test "clamp pins into range"
+    (is (= (clamp 5 0 10) 5))
+    (is (= (clamp -3 0 10) 0))
+    (is (= (clamp 99 0 10) 10)))
+  (test "right paddle sits inside the right wall"
+    (is (= (right-x 200) (- 200 *paddle-margin* *paddle-w*)))))
+
+(describe "ai-track"
+  (test "moves toward the target but no faster than the given speed"
+    ;; target far below ⇒ moves down by exactly `speed`
+    (is (= (ai-track 10 60 100 (paddle-h 100) 0.55) 10.55)))
+  (test "stops exactly on a near target (no overshoot)"
+    (let (ph (paddle-h 100)
+          want (- 50 (/ ph 2)))
+      (is (= (ai-track want 50 100 ph 0.55) want))))
+  (test "never leaves the court"
+    (is (>= (ai-track 0 -1000 100 (paddle-h 100) 5) 0))
+    (is (<= (ai-track 1000 99999 100 (paddle-h 100) 5) (- 100 (paddle-h 100))))))
+
+(describe "english"
+  (test "a centre hit returns the gentle minimum, not flat"
+    (let (ph (paddle-h 100)
+          top 40
+          centre-by (- (center top ph) (/ *ball-h* 2)))
+      (is (>= (abs (english centre-by top ph)) *min-vy*))))
+  (test "stays within the vertical speed cap"
+    (let (ph (paddle-h 100))
+      (is (<= (abs (english 0 50 ph)) *max-vy*))
+      (is (<= (abs (english 99 0 ph)) *max-vy*))))
+  (test "a high hit returns upward, a low hit downward"
+    (let (ph (paddle-h 100) top 40)
+      (is (< (english top top ph) 0))
+      (is (> (english (+ top ph) top ph) 0)))))
+(describe "overlap?"
+  (test "true when the ball's row band meets the paddle"
+    (is (overlap? 10 8 5)))
+  (test "false when the ball is clear of the paddle"
+    (is (not (overlap? 0 50 5)))))
+
+(describe "serve"
+  (test "recentres the ball"
+    (let (st (serve (init 200 60 7) 1))
+      (is (= (get st :bx) (- (/ 200 2) (/ *ball-w* 2))))
+      (is (= (get st :by) (- (/ 60 2) (/ *ball-h* 2))))))
+  (test "launches toward the requested side at full horizontal speed"
+    (is (= (get (serve (init 200 60 7) 1) :vx) *ball-vx*))
+    (is (= (get (serve (init 200 60 7) -1) :vx) (- 0 *ball-vx*))))
+  (test "advances the PRNG seed"
+    (let (st (init 200 60 7))
+      (is (not (= (get (serve st 1) :s) (get st :s)))))))
+
+(describe "score"
+  (test "a ball past the left wall scores for the right and re-serves right"
+    (let (st (score (assoc (init 200 60 7) :bx (- 0 *ball-w* 1) :ls 0 :rs 0)))
+      (is (= (get st :rs) 1))
+      (is (> (get st :vx) 0))))
+  (test "a ball past the right wall scores for the left and re-serves left"
+    (let (st (score (assoc (init 200 60 7) :bx 999 :ls 0 :rs 0)))
+      (is (= (get st :ls) 1))
+      (is (< (get st :vx) 0))))
+  (test "an in-play ball scores nothing"
+    (let (st0 (assoc (init 200 60 7) :bx 100 :ls 0 :rs 0)
+          st (score st0))
+      (is (= (get st :ls) 0))
+      (is (= (get st :rs) 0)))))
+
+(describe "step keeps the world well-formed"
+  (test "ball and paddles stay in bounds over a long game"
+    (let (final (reduce (fn (s _) (step s)) (init 240 67 987654321) (range 5000)))
+      (is (>= (get final :by) -1))
+      (is (<= (+ (get final :by) *ball-h*) 68))
+      (is (>= (get final :lp) 0))
+      (is (<= (get final :lp) 67))
+      (is (>= (get final :rp) 0))
+      (is (<= (get final :rp) 67))))
+  (test "points actually accrue (the AI is beatable)"
+    (let (final (reduce (fn (s _) (step s)) (init 240 67 987654321) (range 5000)))
+      (is (> (+ (get final :ls) (get final :rs)) 0))))
+  (test "explosions and a trail build up during play"
+    (let (final (reduce (fn (s _) (step s)) (init 240 67 987654321) (range 5000)))
+      (is (<= (count (get final :particles)) *part-max*))
+      (is (= (count (get final :trail)) *trail-len*)))))
+
+(describe "hsv->rgb"
+  (test "pure hues map to the expected corners"
+    (is (= (hsv->rgb 0 1 1) [255 0 0]))
+    (is (= (hsv->rgb 120 1 1) [0 255 0]))
+    (is (= (hsv->rgb 240 1 1) [0 0 255])))
+  (test "zero saturation is greyscale"
+    (is (= (hsv->rgb 200 0 1) [255 255 255])))
+  (test "channels stay in byte range for arbitrary hues"
+    (let (c (hsv->rgb 999 0.7 0.4))
+      (is (every? (fn (ch) (and (>= ch 0) (<= ch 255))) c)))))
+
+(describe "particles"
+  (test "spawn-burst adds the requested count and advances the PRNG"
+    (let (st (spawn-burst {:s 7 :particles nil} 10 10 12 1.0 200))
+      (is (= (count (get st :particles)) 12))
+      (is (not (= (get st :s) 7)))
+      (is (every? (fn (p) (> (get p :life) 0)) (get st :particles)))))
+  (test "step-particles ages, moves, and reaps the dead"
+    (let (live {:x 5 :y 5 :vx 1 :vy 0 :life 3 :max 3 :hue 0}
+          dead {:x 0 :y 0 :vx 0 :vy 0 :life 1 :max 5 :hue 0}
+          out (step-particles [live dead]))
+      (is (= (count out) 1))
+      (is (= (get (first out) :life) 2))
+      (is (> (get (first out) :x) 5)))))
+
+(describe "announcer & match arc"
+  (test "rally-shout fires only at milestones"
+    (is (= (rally-shout 4) "RALLY!"))
+    (is (nil? (rally-shout 5)))
+    (is (= (rally-shout 20) "INSANE x20!")))
+  (test "announce sets the callout fields"
+    (let (st (announce {} "GO" 99 40))
+      (is (= (get st :announce) "GO"))
+      (is (= (get st :announce-life) 40))
+      (is (= (get st :announce-max) 40))))
+  (test "a point at match score wins and resets the board"
+    (let (won (point (assoc (init 200 60 7) :ls (- *win-score* 1) :rs 3) :left 200 -1))
+      (is (= (get won :ls) 0))
+      (is (= (get won :rs) 0))
+      (is (= (get won :announce) "LEFT WINS!"))))
+  (test "an ordinary point increments the score and announces POINT"
+    (let (p (point (assoc (init 200 60 7) :ls 2 :rs 2) :right 0 1))
+      (is (= (get p :rs) 3))
+      (is (= (get p :announce) "POINT!")))))
+
+(describe "hit-stop"
+  (test "a frozen frame holds the ball still and ticks the timer down"
+    (let (frozen (assoc (init 200 60 7) :freeze 3 :bx 50 :by 20)
+          out (step frozen))
+      (is (= (get out :freeze) 2))
+      (is (= (get out :bx) 50))
+      (is (= (get out :by) 20)))))
+
+(describe "power-ups"
+  (test "an effect resizes / re-speeds only its own side"
+    (let (rows 100
+          grown (assoc (init 200 rows 7) :l-fx [{:kind :grow :life 100}])
+          slowed (assoc (init 200 rows 7) :r-fx [{:kind :slow :life 100}]))
+      ; grow ⇒ taller
+      (is (> (side-ph grown :left rows) (paddle-h rows)))
+      ; other side unchanged
+      (is (= (side-ph grown :right rows) (paddle-h rows)))
+      ; slow ⇒ slower
+      (is (< (side-speed slowed :right 1.0) 1.0))
+      (is (= (side-speed slowed :left 1.0) 1.0))))
+  (test "spawn-powerup drops a token and advances the PRNG"
+    (let (st (spawn-powerup (init 400 200 7)))
+      (is (= (count (get st :tokens)) 1))
+      (is (not (= (get st :s) (get (init 400 200 7) :s))))))
+  (test "the ball collects a token for its owner; an ownerless ball does not"
+    (let (tok {:kind :grow :good? true :name "GROW" :glyph "+" :x 100 :y 50 :life 99}
+          base (assoc (init 400 200 7) :tokens [tok] :bx 100 :by 50)
+          owned (collect-powerups (assoc base :owner :right))
+          free (collect-powerups (assoc base :owner nil)))
+      ; collected
+      (is (= (count (get owned :tokens)) 0))
+      ; awarded to the owner (right), carrying its glyph for the HUD
+      (is (= (count (get owned :r-fx)) 1))
+      (is (= (get (first (get owned :r-fx)) :glyph) "+"))
+      ; no owner ⇒ left on court
+      (is (= (count (get free :tokens)) 1))
+      (is (= (count (get free :r-fx)) 0)))))
+
+(describe "charged shot & momentum"
+  (test "a charged hit returns faster than a normal one (capped, no tunnelling)"
+    (is (> (return-speed-for *ball-vx* true) (return-speed-for *ball-vx* false)))
+    (is (<= (return-speed-for 99 true) *charge-max*))
+    (is (< *charge-max* *paddle-w*)))
+  ; but bleeding back toward base
+  (test "a normal hit keeps momentum: a fast ball stays above base, easing back"
+    (let (kept (return-speed-for 4.0 false))
+      ; still fast
+      (is (> kept *ball-vx*))
+      (is (< kept 4.0))))
+  (test "a normal hit at base speed returns at base speed"
+    (is (= (return-speed-for *ball-vx* false) *ball-vx*))))
+
+(describe "paddle colour"
+  (test "a clean paddle keeps its fixed base colour (no rainbow)"
+    (is (= (paddle-color (init 200 60 7) :left *left-color*) *left-color*)))
+  (test "power-ups blend the paddle colour away from its base"
+    (let (buffed (assoc (init 200 60 7) :l-fx [{:kind :grow :good? true :life 9}]))
+      (is (not (= (paddle-color buffed :left *left-color*) *left-color*))))))
+
+(describe "exploding fan"
+  (test "past the threshold a fan explosion gaps several seats + announces BOOM"
+    (let (out (fan-explosion (assoc (init 400 120 7) :rally 25)))
+      (is (= (count (get out :abducted)) *fan-victims*))
+      (is (= (get out :announce) "BOOM!"))))
+  (test "the gapped fans repopulate on the abduction timer"
+    (let (out (assoc (init 400 120 7) :abducted [{:col 20 :life 1}] :ufo nil :ufo-timer 9999))
+      (is (= (count (get (step-ufo out) :abducted)) 0)))))
+
+(describe "crowd signs"
+  (test "a batch of 2–8 signs pops up, each held about 10 s"
+    (let (st (reduce (fn (s _) (step s)) (init 600 180 7) (range 120))
+          n (count (get st :signs)))
+      (is (>= n *sign-min*))
+      (is (<= n *sign-max*))
+      (is (<= (get (first (get st :signs)) :life) (+ *sign-life* *sign-life-jitter*))))))
+
+; never up into the court
+; quiet sits lower (less lifted)
+(describe "crowd"
+  (test "a point makes the crowd cheer, and the cheer ebbs each frame"
+    (let (scored (point (assoc (init 200 60 7) :ls 0 :rs 0) :left 200 -1))
+      (is (> (get scored :cheer) 0))
+      (is (< (get (step scored) :cheer) (get scored :cheer)))))
+  (test "excitement climbs with the rally length"
+    (let (calm (crowd-excitement (assoc (init 200 60 7) :rally 0 :cheer 0))
+          hyped (crowd-excitement (assoc (init 200 60 7) :rally 99 :cheer 0)))
+      (is (< calm hyped))
+      (is (= hyped 1.0))))
+  (test "a hyped crowd stands higher than a calm one, and stays in its band"
+    (let (rows 52
+          top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
+          calm (crowd-ops (assoc (init 200 60 7) :rally 0 :cheer 0) 200 rows)
+          hyped (crowd-ops (assoc (init 200 60 7) :rally 99 :cheer 0) 200 rows))
+      ; it's a packed crowd, not a bar
+      (is (> (count calm) 20))
+      ; hyped reaches higher (smaller row)
+      (is (<= (top-row hyped) (top-row calm)))
+      (is (every? (fn (o) (>= (vector-ref o 1) rows)) calm))))
+  (test "the Mexican wave only runs once the shot count hits the threshold"
+    (let (rows 52
+          top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
+          ;; same excitement both sides (cheer 0), differing only in rally vs threshold
+          below (crowd-ops (assoc (init 200 60 7) :rally (- *wave-threshold* 1) :cheer 0) 200 rows)
+          at (crowd-ops (assoc (init 200 60 7) :rally *wave-threshold* :cheer 0) 200 rows))
+      ;; with the wave running, some seat is lifted higher than without it
+      (is (< (top-row at) (top-row below)))))
+  (test "wave-count steps up: single / double / triple by shot count"
+    (is (= (wave-count (- *wave-threshold* 1)) 0))
+    (is (= (wave-count *wave-threshold*) 1))
+    (is (= (wave-count *wave-double*) 2))
+    (is (= (wave-count *wave-triple*) 3)))
+  (test "the crowd is near-still at a low shot count, livelier as it climbs"
+    (let (rows 70
+          top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
+          quiet (crowd-ops (assoc (init 400 90 7) :rally 0 :cheer 0 :t 0) 400 rows)
+          busy (crowd-ops (assoc (init 400 90 7) :rally 9 :cheer 0 :t 0) 400 rows))
+      (is (>= (top-row quiet) (top-row busy))))))
+(describe "aliens"
+  (test "the rare-event roll eventually summons a UFO"
+    (let (out (reduce (fn (s _)
+                        (if (nil? (get s :ufo))
+                          (step-event (assoc s :ufo-timer 1) :ufo-timer spawn-ufo)
+                          s))
+                (init 400 180 7)
+                (range 50)))
+      (is (not (nil? (get out :ufo))))))
+  (test "the event check resets to a ~1-minute (jittered) timer"
+    (let ([frames _] (next-check-timer 12345))
+      (is (>= frames (- *event-check* *event-jitter*)))
+      (is (<= frames (+ *event-check* *event-jitter*)))))
+  (test "the UFO abducts its target seat as it passes over"
+    (let (st (assoc (init 400 180 7) :ufo {:x 200 :vx 1.8 :target 201 :grabbed false} :abducted nil)
+          grabbed (step-ufo st))
+      (is (= (count (get grabbed :abducted)) 1))
+      (is (= (get (first (get grabbed :abducted)) :col) 201))))
+  (test "an abductee respawns when its timer runs out"
+    (let (st (assoc (init 400 180 7) :ufo nil :ufo-timer 9999 :abducted [{:col 50 :life 1}]))
+      (is (= (count (get (step-ufo st) :abducted)) 0))))
+  (test "an abducted seat leaves a gap in the front row"
+    (let (rows 120
+          full (crowd-ops (assoc (init 400 140 7) :abducted nil) 400 rows)
+          gap (crowd-ops (assoc (init 400 140 7) :abducted [{:col 0 :life 50}]) 400 rows))
+      (is (< (count gap) (count full))))))
+
+(describe "streaker"
+  ; starting at the court's bottom edge (the stand)
+  (test "a streaker bursts out of the crowd (gap) when its timer elapses"
+    (let (out (step-streaker (assoc (init 400 180 7) :streaker nil :streaker-timer 1 :abducted nil))
+          sk (get out :streaker))
+      (is (not (nil? sk)))
+      ; a gap opened in the crowd
+      (is (= (count (get out :abducted)) 1))
+      ; streaker starts at that seat
+      (is (= (get sk :x) (get (first (get out :abducted)) :col)))
+      (is (= (get sk :y) 180))))
+  (test "the next-streaker delay is the frequent 15–35 s gap"
+    (let ([frames _] (next-streaker-timer 999))
+      (is (>= frames *streaker-min-gap*))
+      (is (<= frames *streaker-max-gap*))))
+  (test "streaker-kill removes the streaker; the ball passes through unchanged"
+    (let (st (assoc (init 400 120 7)
+               :streaker {:x 100 :y 40 :vx 1.5 :bumped false}
+               :vx -2.0
+               :vy 0.4)
+          out (streaker-kill st))
+      (is (nil? (get out :streaker)))
+      ; ball not deflected
+      (is (= (get out :vx) -2.0))
+      (is (= (get out :announce) "SPLAT!"))))
+  (test "streaker-bounce bats the ball back like a paddle, keeping pace"
+    (let (st (assoc (init 400 120 7)
+               :streaker {:x 100 :y 40 :vx 1.5 :bumped false}
+               :bx 101
+               :by 48
+               :vx -2.0
+               :vy 0)
+          out (streaker-bounce st))
+      ; reversed (was heading left)
+      (is (> (get out :vx) 0))
+      ; pace kept
+      (is (= (abs (get out :vx)) 2.0))
+      (is (get (get out :streaker) :bumped))))
+  (test "a streaker clear of the ball does not touch it"
+    (let (sk {:x 300 :y 10 :vx 1.5 :vy 0 :ty 10 :bumped false}
+          st (assoc (init 400 120 7) :streaker sk :bx 50 :by 80 :vx 2.0 :vy 0.7)
+          out (step-streaker st))
+      (is (= (get out :vy) 0.7)))))
+
+(describe "HUD: effect indicators"
+  (test "an active effect draws a badge whose duration bar shrinks as it expires"
+    (let (full (fx-badge-ops 0 0 {:kind :grow :glyph "+" :good? true :life *fx-life*})
+          low (fx-badge-ops 0 0 {:kind :grow :glyph "+" :good? true :life (quot *fx-life* 4)})
+          ;; the LAST op of a badge is the coloured duration bar — its width is element 3
+          bar-w (fn (ops) (vector-ref (last ops) 3)))
+      (is (> (bar-w full) (bar-w low)))))
+  (test "indicators show one badge-group per active effect, in the top corners"
+    (let (st (assoc (init 400 60 7)
+               :l-fx [{:kind :grow :glyph "+" :good? true :life 100}]
+               :r-fx [{:kind :slow :glyph "~" :good? false :life 100}])
+          ops (effect-indicator-ops st 400))
+      (is (> (count ops) 0))
+      (is (every? (fn (o) (>= (vector-ref o 1) 0)) ops)))))
+(describe "wind"
+  ; sign preserved
+  (test "clamp-vx keeps the ball crossing but under the paddle width (no tunnelling)"
+    (is (< (abs (clamp-vx 99)) *paddle-w*))
+    (is (> (abs (clamp-vx 0.01)) 0))
+    (is (< (clamp-vx -99) 0)))
+  ; but only part-way (eased)
+  (test "step-wind eases the wind toward its target"
+    (let (st (assoc (init 200 60 7) :wind-x 0 :wind-tx 1.0 :wind-timer 50)
+          out (step-wind st))
+      ; moved toward the target
+      (is (> (get out :wind-x) 0))
+      (is (< (get out :wind-x) 1.0))))
+  (test "streaks drift and wrap inside the court"
+    (let (st (assoc (init 200 100 7) :wind-x 1.0 :wind-y 0)
+          out (step-streaks st))
+      (is (every? (fn (p) (and (>= (get p :x) 0) (< (get p :x) 200))) (get out :streaks)))))
+  (test "the STORM power-up whips up a gale for a while"
+    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left)
+                {:kind :wind :good? false :name "STORM" :glyph "@" :x 50 :y 50}))
+      (is (= (get out :wind-gust) *wind-gust-frames*))
+      (is (= (get out :announce) "STORM!"))))
+  (test "while a storm is active the wind targets a strong gale, not a lull"
+    (let (out (step-wind (assoc (init 200 60 7) :wind-gust 100 :wind-timer 0)))
+      (is (> (+ (abs (get out :wind-tx)) (abs (get out :wind-ty))) *wind-max*)))))
+
+(describe "predictive AI"
+  ; it predicts ahead, not the current centre
+  (test "predict-center anticipates the bounce-folded arrival, not the current y"
+    (let (rows 100
+          ;; ball heading right and downward toward the right paddle
+          st (assoc (init 200 rows 7) :bx 100 :by 50 :vx 2 :vy 1)
+          pred (predict-center st :right rows))
+      (is (>= pred 0))
+      ; folded into the court, never off it
+      (is (<= pred rows))
+      (is (not (= pred (+ 50 (/ *ball-h* 2)))))))
+  (test "reflect folds a value into [0, hi] like a wall bounce"
+    (is (= (reflect 3 10) 3))
+    ; 12 reflects back to 8
+    (is (= (reflect 12 10) 8))
+    (is (= (reflect -2 10) 2))))
+
+; it came back out
+(describe "ball crashes into the crowd"
+  (test "a fast bottom-wall hit smashes through: dives in, gaps fans, slows down"
+    (let (st (assoc (init 400 120 7) :bx 200 :by 119 :vx 4.2 :vy 2.0 :abducted nil)
+          out (crowd-crash st))
+      (is (= (count (get out :abducted)) *crash-victims*))
+      ; the ball actually goes IN, it doesn't just splat
+      (is (get out :in-crowd))
+      ; plunging downward into the stand
+      (is (> (get out :vy) 0))
+      (is (< (abs (get out :vx)) 4.2))
+      (is (= (get out :announce) "CRASH!"))))
+  (test "a ball in the crowd is carved through and returned, not stuck"
+    (let (dove (crowd-crash (assoc (init 400 120 7) :bx 200 :by 119 :vx 3.8 :vy 2.0))
+          ;; let it travel down, hit the stand floor, and climb back into play
+          out (reduce (fn (s _) (bounce-walls (assoc s :by (+ (get s :by) (get s :vy)))))
+                dove
+                (range 80)))
+      (is (not (get out :in-crowd))))))
+(describe "shooting"
+  (test "the AMMO power-up loads the owner's gun"
+    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left)
+                {:kind :ammo :good? true :name "AMMO" :glyph "*" :x 50 :y 50}))
+      (is (= (get out :l-ammo) *ammo-per-pickup*))))
+  (test "a side with ammo fires on cooldown, spending a shot"
+    (let (out (side-fire (assoc (init 400 120 7) :l-ammo 3 :l-fire 1) :left))
+      (is (= (count (get out :bullets)) 1))
+      (is (= (get out :l-ammo) 2))))
+  (test "a hit cracks the paddle; a second hit breaks it"
+    (let (shot (fn (st)
+                 (bullet-hits (assoc st
+                                :bullets [{:x (- (right-x 400) 1)
+                                           :y 50
+                                           :vx *bullet-speed*
+                                           :side :left}]
+                                :rp 45)))
+          cracked (shot (init 400 120 7))
+          broken (shot cracked))
+      (is (= (get cracked :r-dmg) 1))
+      (is (= (get broken :r-dmg) 2))))
+  ; not reversed ⇒ passed through
+  (test "a broken paddle no longer blocks the ball"
+    (let (st (assoc (init 400 120 7) :r-dmg 2 :bx (- (right-x 400) 1) :by 50 :vx 2.7 :rp 45)
+          out (bounce-paddles st))
+      (is (> (get out :vx) 0))))
+  (test "bullets gun down the streaker too"
+    (let (st (assoc (init 400 120 7)
+               :streaker {:x 100 :y 50 :vx 1.5 :vy 0 :ty 50 :bumped false}
+               :bullets [{:x 102 :y 51 :vx *bullet-speed* :side :left}])
+          out (bullet-hits st))
+      (is (nil? (get out :streaker)))))
+  (test "an IDLE paddle dodges an incoming bullet, but a DEFENDING one won't"
+    (let (st (assoc (init 400 120 7)
+               :bullets [{:x (+ (left-x) 30) :y 50 :vx (- 0 *bullet-speed*) :side :right}]
+               :lp 48)
+          idle (paddle-target st :left 24 48 50 true)
+          defending (paddle-target st :left 24 48 50 false))
+      (is (not (= idle 50)))
+      (is (= defending 50))))
+  (test "bullet speed is fixed, and between normal and fastest ball pace"
+    (is (> *bullet-speed* *ball-vx*))
+    (is (< *bullet-speed* *charge-max*))))
+
+(describe "goals"
+  (test "the goal mouth + posts render behind each paddle"
+    (is (> (count (goal-ops 400 120)) 0)))
+  (test "paddles sit a goal-mouth depth off the wall"
+    (is (= (left-x) *paddle-margin*))
+    (is (= (right-x 400) (- 400 *paddle-margin* *paddle-w*)))))
+
+(describe "court events"
+  (test "every event has a headline, and spawn arms one + announces it"
+    (let (out (spawn-court-event (init 400 120 7)))
+      (is (not (nil? (get out :event))))
+      (is (= (get out :announce) (event-name (event-kind out))))))
+  (test "an event ages and clears when its life runs out"
+    (let (out (step-court-event (assoc (init 400 120 7) :event {:kind :quake :life 1})))
+      (is (nil? (get out :event)))))
+  (test "GRAVITY drags the ball downward"
+    (is (> (get (step (assoc (init 400 120 7) :event {:kind :gravity :life 99} :vy 0)) :vy) 0)))
+  (test "SLOW-MO moves the ball less than its speed"
+    (let (out (step (assoc (init 400 120 7) :event {:kind :slowmo :life 99} :vx 2 :vy 0 :bx 100)))
+      (is (< (- (get out :bx) 100) 2))))
+  (test "TINY shrinks the paddles"
+    (is (< (side-ph (assoc (init 400 120 7) :event {:kind :tiny :life 99}) :left 100)
+          (side-ph (init 400 120 7) :left 100)))))
+
+(describe "crowd shows (cosmetic)"
+  (test "spawn-show picks one of the catalog shows"
+    (let (out (spawn-show (init 400 120 7)))
+      (is (includes? *shows* (get (get out :show) :kind)))))
+  (test "a show ages and clears when done"
+    (let (out (step-show (assoc (init 400 120 7) :show {:kind :lights :life 1})))
+      (is (nil? (get out :show)))))
+  (test "every show kind renders some ops"
+    (is (every? (fn (k)
+                  (> (count (crowd-show-ops (assoc (init 400 120 7) :show {:kind k :life 99})
+                              400
+                              100))
+                    0))
+          *shows*))))

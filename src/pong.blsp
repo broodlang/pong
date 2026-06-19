@@ -1,0 +1,2229 @@
+(defmodule pong
+  "Pong with two AI players, animated in a native GUI window that fills the
+screen. There is no human input — both paddles are driven by `ai-target`, which
+tracks the ball with a CAPPED speed (so a sharply-angled return can beat a
+paddle and score). The whole court is the window: all geometry is derived from
+`gui-size` in character CELLS and refit on `[:resize]`. One self-paced process
+(the window owner) draws a frame, parks in `(receive)` on an `(after)` frame
+timer that quit keys / the window X preempt, then steps the world and recurses
+— the ADR-058 self-clocked loop, minus the second actor (nothing to react to)."
+  (:use editor/display))
+
+;; ---- geometry & tuning (all lengths in screen CELLS; speeds in cells/frame) ----
+;; A mono cell is taller than wide (≈1:2 w:h), so horizontal lengths/speeds are
+;; ~doubled against vertical ones to read as square / isotropic on screen.
+; ~60 fps target between physics steps (the `(after)` period)
+(def *frame-ms* 16)
+;; The window uses a SMALL cell font (`*cell-px*`), so a cell is only a few
+;; pixels: the ball/paddles are `floor`'d to whole cells, and a smaller cell
+;; means a finer quantum and visibly smoother motion (the brood-life trick).
+;; Because cells are small the court is MANY cells, so the cell-denominated
+;; sizes/speeds below are sized for that dense grid, not a chunky one.
+; cell font height in px — small ⇒ fine motion quantum
+(def *cell-px* 6)
+; paddle thickness in columns (thin vertical bar)
+(def *paddle-w* 5)
+; columns between a paddle's outer edge and the wall — the GOAL MOUTH depth behind it
+(def *paddle-margin* 11)
+; paddle height as a fraction of court rows
+(def *paddle-frac* 0.16)
+; floor on paddle height (rows) so a short window still plays
+(def *paddle-min-h* 11)
+; max rows the DEFENDING paddle moves per frame (capped ⇒ beatable, but quick)
+(def *paddle-speed* 1.5)
+; rows/frame the idle paddle drifts back to centre (recovers fast ⇒ competitive)
+(def *return-speed* 0.78)
+; ball width in columns
+(def *ball-w* 5)
+; ball height in rows
+(def *ball-h* 3)
+; horizontal ball speed (columns/frame) — slower ⇒ long competitive rallies (< *paddle-w*)
+(def *ball-vx* 2.7)
+;; CHARGED SHOT: a player can charge and release ON contact for extra pace — but
+;; the timing window is tiny, so each hit only nails it `*charge-chance*` of the
+;; time. A charged hit multiplies the ball's speed (capped under `*paddle-w*` so
+;; it can't tunnel); a normal hit keeps `*momentum-keep*` of the ball's current
+;; excess pace, so a fast ball STAYS fast for a while before easing back to base.
+; odds a player times the charge release right
+(def *charge-chance* 0.05)
+; ×speed on a charged hit
+(def *charge-boost* 1.45)
+; speed ceiling (< *paddle-w* 5, so no tunnelling)
+(def *charge-max* 4.6)
+; fraction of the over-base speed a normal hit retains
+(def *momentum-keep* 0.75)
+; frames the charged-shot graphic (an expanding energy ring on the ball) plays
+(def *charge-glow-frames* 16)
+; max |vy| (rows/frame) at serve — the random launch angle
+(def *serve-vy* 0.9)
+; min |vy| after a paddle hit — the ball is never dead-flat (no infinite rally)
+(def *min-vy* 0.5)
+; cap on |vy| (rows/frame) so english can't make the ball vertical
+(def *max-vy* 2.7)
+; how strongly an off-centre paddle hit angles the return
+(def *english* 1.25)
+;; The AI is deliberately IMPERFECT: instead of homing exactly on the ball it
+;; aims at the ball's centre plus a small bias that is re-rolled every
+;; `*aim-period*` frames, ranging up to `*aim-error*` of a paddle-height either
+;; way. Without it the paddle centres the ball, returns a flat centre hit, and
+;; re-centres forever (a stable attractor → endless rally). The bias makes hits
+;; land off-centre, so angles vary and a player genuinely misses now and then.
+;; aim bias bound, as a fraction of paddle height (rows). The AI now ANTICIPATES
+;; the ball's bounce-folded arrival (predict-center), so capped speed no longer
+;; causes misses — this bias is the sole miss source, hence it's wide enough to
+;; occasionally place a mis-aimed paddle clear of the ball (a conceded point).
+(def *aim-error* 0.7)
+; frames between re-rolls of each paddle's aim bias
+(def *aim-period* 17)
+;; ---- COLOUR & FX ----------------------------------------------------------
+;; Everything rainbows: a global `:hue` advances `*hue-step*` degrees per frame,
+;; and the ball, paddles, net and trail derive their colour from it (so the whole
+;; court cycles through the spectrum). Paddle/ball hits and points fire PARTICLE
+;; explosions, and a point flashes the court in the scorer's colour.
+; the court when idle: near-black navy, filled as one rect
+(def *bg-face* {:bg [10 12 20]})
+; degrees the master hue advances each frame (full spectrum ≈ every 120 frames)
+(def *hue-step* 3)
+; hue offset (deg) for the LEFT / RIGHT score glow (the two read distinct)
+(def *left-hue* 130)
+(def *right-hue* 250)
+;; The paddles keep a FIXED base colour (they do NOT ride the rainbow) — left
+;; cyan, right magenta — but tint toward the BLEND of their active power-ups
+;; (green per good effect, red per bad), so a buffed/cursed paddle reads at a glance.
+(def *left-color* [80 220 250])
+(def *right-color* [250 120 200])
+; scaled-up glyph size for the score readout (cells; cell is small now)
+(def *score-scale* 11)
+; centre-net dash: `*net-dash*` rows of net every `*net-period*` rows, `*net-w*` wide
+(def *net-dash* 5)
+(def *net-period* 11)
+(def *net-w* 2)
+; the score readout: bright, bold — its hue tracks the master hue in `render`
+(def *score-face* {:bold true})
+;; ball TRAIL: the last `*trail-len*` ball positions, fading out behind it.
+(def *trail-len* 16)
+;; PARTICLES (explosions): each is {:x :y :vx :vy :life :max :hue}. A hit fires a
+;; small burst, a point a big one; they drift, feel a little gravity, and fade.
+; hard cap on live particles (keeps a long match's draw cost bounded)
+(def *part-max* 320)
+; particle lifetime range in frames (random per particle)
+(def *part-life-min* 16)
+(def *part-life-max* 42)
+; downward pull (rows/frame²) so a burst arcs and settles like a firework
+(def *part-gravity* 0.05)
+; per-frame velocity decay (air drag) so particles ease out rather than fly off
+(def *part-drag* 0.95)
+; burst size + launch speed for a WALL bounce (every touch sparks)
+(def *wall-particles* 16)
+(def *wall-speed* 1.0)
+; burst size + launch speed for a PADDLE HIT
+(def *hit-particles* 34)
+(def *hit-speed* 1.4)
+; burst size + launch speed for a POINT (bigger, faster — a real explosion)
+(def *score-particles* 130)
+(def *score-speed* 2.4)
+; frames a point's full-court colour FLASH lasts (fading out over its life)
+(def *flash-frames* 18)
+;; CONTACT REACTIONS — "change colours when things touch": every collision KICKS
+;; the master hue by a big jump (so the ball, paddles, net, trail and scores all
+;; snap to a new palette on contact), SHAKES the court, and POPS the ball bright.
+; degrees the hue jumps on a WALL bounce / PADDLE hit / POINT (≈ golden angle on a hit)
+(def *wall-hue-kick* 64)
+(def *hit-hue-kick* 137)
+(def *score-hue-kick* 191)
+; screen-shake magnitude (cells) kicked in on a wall / hit / point — decays each frame
+(def *wall-shake* 1.5)
+(def *hit-shake* 3.5)
+(def *score-shake* 9)
+; per-frame shake decay (×) — how fast the court settles after a jolt
+(def *shake-decay* 0.8)
+; ball IMPACT POP: frames the ball flares white, growing `*pop-grow*` cells, on a touch
+(def *pop-frames* 7)
+(def *pop-grow* 3)
+;; HIT-STOP — the world FREEZES for a beat on impact (only the shake rumbles and
+;; the announcement animates while frozen), the fighting-game trick that gives a
+;; collision weight. Walls don't freeze (too frequent — it'd stutter constantly).
+(def *hit-freeze* 2)
+(def *score-freeze* 9)
+(def *win-freeze* 24)
+;; RALLY COMBO — consecutive paddle hits in one point. The longer the rally, the
+;; bigger its bursts/shake build, and milestones fire an ANNOUNCER callout.
+; extra hit particles per rally hit
+(def *rally-particle-step* 3)
+; extra hit shake (cells) per rally hit
+(def *rally-shake-step* 0.25)
+; ceiling on that rally shake bonus
+(def *rally-shake-cap* 4)
+;; ANNOUNCER — big centred text that punches in and fades (rally milestones, a
+;; point, a match win). First to `*win-score*` wins, then the match resets.
+(def *win-score* 11)
+; frames a normal callout lives
+(def *announce-life* 42)
+; frames a match-win callout lives (lingers)
+(def *win-announce-life* 95)
+; base glyph scale of a callout (punches a little bigger)
+(def *announce-scale* 10)
+;; ---- POWER-UPS ------------------------------------------------------------
+;; Tokens drift onto the court; when the BALL touches one it's awarded to the
+;; ball's current OWNER — the paddle that last hit it — applying a timed effect
+;; to THAT paddle. Effects are good OR bad for the owner, so a token is a gamble:
+;; GROW/SPEED help, SHRINK/SLOW hurt. (No owner yet — fresh serve — ⇒ no pickup.)
+;; The catalog of tokens (sampled uniformly). Four good, four bad — height and
+;; speed each come in a normal and an EXTREME flavour, for more variety.
+(def *powerups*
+  [{:kind :grow :good? true :name "GROW" :glyph "+"} {:kind :giant
+                                                      :good? true
+                                                      :name "GIANT"
+                                                      :glyph "G"}
+    {:kind :speed :good? true :name "SPEED" :glyph ">"}
+    {:kind :turbo :good? true :name "TURBO" :glyph "T"}
+    {:kind :shrink :good? false :name "SHRINK" :glyph "-"}
+    {:kind :mini :good? false :name "MINI" :glyph "m"}
+    {:kind :slow :good? false :name "SLOW" :glyph "~"}
+    {:kind :freeze :good? false :name "FREEZE" :glyph "x"}
+    {:kind :wind :good? false :name "STORM" :glyph "@"}
+    ;; AMMO listed several times — it's sampled uniformly, so this weights bullet
+    ;; pickups to ~1 in 3 tokens (the player wanted to shoot a lot)
+    {:kind :ammo :good? true :name "AMMO" :glyph "*"}
+    {:kind :ammo :good? true :name "AMMO" :glyph "*"}
+    {:kind :ammo :good? true :name "AMMO" :glyph "*"}
+    {:kind :ammo :good? true :name "AMMO" :glyph "*"}])
+; paddle-height ×multiplier per active height effect on that side
+(def *fx-grow* 1.8)
+(def *fx-giant* 2.6)
+(def *fx-shrink* 0.55)
+(def *fx-mini* 0.35)
+; paddle-speed ×multiplier per active speed effect on that side
+(def *fx-fast* 1.7)
+(def *fx-turbo* 2.4)
+(def *fx-slow* 0.55)
+(def *fx-freeze* 0.3)
+; frames a picked-up effect lasts (~7s)
+(def *fx-life* 420)
+; frames between token spawns, the most on court at once, and a token's own lifetime
+(def *powerup-every* 200)
+(def *powerup-max* 3)
+(def *powerup-life* 700)
+; token size in cells (a chunky glossy badge: glow + body + sheen + glyph)
+(def *powerup-w* 7)
+(def *powerup-h* 5)
+; token hue: green-ish for a GOOD token, red-ish for a BAD one
+(def *good-hue* 140)
+(def *bad-hue* 357)
+;; ---- HUD: active-effect indicators ----------------------------------------
+; a per-effect indicator badge (top corners): size, gap, and where the stack starts
+(def *fx-badge-w* 6)
+(def *fx-badge-h* 5)
+(def *fx-badge-gap* 2)
+(def *fx-badge-top* 2)
+;; ---- THE CROWD ------------------------------------------------------------
+;; A packed grandstand along the bottom — rows of little spectators (torso, head,
+;; and arms that fly up). They build EXCITEMENT the longer the current rally runs
+;; (`crowd-excitement`: the whole stand rises and brightens), run a perpetual
+;; MEXICAN WAVE whose crest lifts each seat as it sweeps past (taller when hyped),
+;; and on a point ERUPT — leaping with arms up in a riot of colour (`:cheer`).
+; rows the grandstand occupies along the bottom (tall enough for figures + leaps)
+(def *crowd-rows* 16)
+; columns between spectators in a tier, and each spectator's width
+(def *crowd-spacing* 5)
+(def *crowd-person-w* 3)
+; tiers of spectators (depth) — back tiers sit `*crowd-tier-rise*` cells higher + dimmer
+(def *crowd-tiers* 2)
+(def *crowd-tier-rise* 3)
+; rally length at which the crowd is fully hyped (whole stand stands up)
+(def *rally-hype* 12)
+; shot counts at which the crowd runs a SINGLE / DOUBLE / TRIPLE Mexican wave
+(def *wave-threshold* 10)
+(def *wave-double* 20)
+(def *wave-triple* 40)
+; cells the whole stand rises at full excitement (on top of the wave)
+(def *excited-lift* 3)
+;; Mexican wave: a crest sweeping across the stand. `*wave-width*` is its reach
+;; (cells) either side, `*wave-speed*` how fast it travels, `*wave-lift*` how high
+;; a seat rises at the crest (scaled up by excitement).
+(def *wave-width* 20)
+(def *wave-speed* 0.85)
+(def *wave-lift* 4)
+; frames a cheer lasts after a point (the eruption), doubled on a win
+(def *cheer-frames* 70)
+; how high (cells) a spectator leaps at peak cheer
+(def *cheer-jump* 3)
+; paddle speed BONUS while the crowd cheers — the roar fires the players up (+×)
+(def *cheer-speed-boost* 0.5)
+;; ---- RARE EVENTS (UFO + streaker) -----------------------------------------
+;; Both the alien and the streaker are RARE one-offs. Rather than a fixed gap,
+;; each rolls a chance on a recurring timer: about once a minute (jittered) it
+;; rolls, and with `*event-chance*` it appears — so on average a few minutes
+;; apart, but never on a predictable clock.
+; ~1 minute between rolls
+(def *event-check* 3600)
+; ± up to ~10 s of jitter on that interval
+(def *event-jitter* 600)
+; chance the roll actually summons the event
+(def *event-chance* 0.3)
+;; ---- ALIENS ---------------------------------------------------------------
+;; A UFO drifts across above the stand, locks a tractor beam onto one spectator
+;; and ABDUCTS them (a gap opens in the crowd); the abductee is RESPAWNED a few
+;; seconds later. Purely cosmetic — it never touches the game.
+; the saucer's width + cross-court speed
+(def *ufo-w* 10)
+(def *ufo-speed* 1.8)
+; how near the beam reaches around its target column (cells) — when the beam shows
+(def *beam-window* 10)
+; frames an abducted spectator stays gone before respawning
+(def *abduct-respawn* 340)
+;; ---- STREAKER -------------------------------------------------------------
+;; Every `*streaker-min-gap*`..`*streaker-max-gap*` frames a naked spectator bursts
+;; OUT OF THE CROWD (leaving a gap that repopulates), climbs onto the court and
+;; bolts across it. If the ball hits them it's a coin-flip: 50% KILLED (splat,
+;; ball through) and 50% they whack it back like a paddle. Never touches the score.
+; ~15 s
+(def *streaker-min-gap* 900)
+; ~35 s
+(def *streaker-max-gap* 2100)
+(def *streaker-w* 3)
+(def *streaker-h* 5)
+; cells/frame across the court
+(def *streaker-speed* 1.5)
+; cells/frame they climb up out of the stand before running flat across
+(def *streaker-climb* 1.0)
+; frames a paddle is FROZEN (can't move) after a streaker splats into it
+(def *paddle-freeze-frames* 90)
+;; ---- CROWD SIGNS ----------------------------------------------------------
+;; Spectators hold up placards: a batch of 2–8 pops up at once, each held for
+;; ~10 s, then they all drop and (after a short gap) a fresh batch appears.
+(def *sign-min* 2)
+(def *sign-max* 8)
+; ~10 s a sign stays up
+(def *sign-life* 600)
+; ± frames so they don't all drop on the same frame
+(def *sign-life-jitter* 120)
+; ~2 s pause between batches
+(def *sign-gap* 120)
+; placard text scale
+(def *sign-scale* 2)
+(def *signs-text*
+  ["GO!" "PONG!" "WOO!" "<3" "MVP" "RALLY!" "BOO!" "AI #1" "GO GO" "555" "NICE" "OOF"])
+;; ---- EXPLODING FAN --------------------------------------------------------
+;; Past `*fan-threshold*` shots the crowd is so worked up that on each hit there's
+;; a `*fan-chance*` a fan blows up, taking `*fan-victims*` neighbours with them
+;; (a big burst + a gap that repopulates on the same abduction timer).
+(def *fan-threshold* 20)
+(def *fan-chance* 0.1)
+(def *fan-victims* 4)
+;; ---- BALL CRASHES INTO THE CROWD ------------------------------------------
+;; A FAST ball hitting the bottom wall has a chance to punch through into the
+;; stand, splatting a few spectators (gaps that repopulate) and losing some pace.
+; ball must be at least this fast (|vx|) to break through
+(def *crash-speed* 3.6)
+(def *crash-chance* 0.1)
+(def *crash-victims* 3)
+; ×speed kept after smashing into the crowd
+(def *crash-slow* 0.7)
+;; ---- SHOOTING -------------------------------------------------------------
+;; Players can SHOOT each other. Ammo comes from the AMMO power-up. A hit CRACKS
+;; the enemy paddle; a second hit BREAKS it (it can't block until that side loses
+;; a point). Bullets are SLOW, so the AI dodges incoming fire; the AI only aims
+;; true ~`*aim-true-chance*` of the time, so most shots miss anyway.
+; shots granted by one AMMO pickup
+(def *ammo-per-pickup* 5)
+;; Faster than the normal ball, but slower than the fastest (charged) ball, so a
+;; well-timed dodge still beats it (and it never tunnels the paddle: < *paddle-w*).
+(def *bullet-speed* 3.5)
+(def *bullet-w* 2)
+(def *bullet-h* 1)
+; frames between a side's shots
+(def *fire-cooldown* 75)
+; chance a shot LEADS the target (else it's sprayed off)
+(def *aim-true-chance* 0.3)
+; a paddle dodges incoming fire within this fraction of the court
+(def *dodge-frac* 0.45)
+;; ---- CROWD SHOWS (cosmetic, no gameplay effect) ---------------------------
+;; A random crowd spectacle plays for `*show-life*` frames every so often: phone
+;; lights, a sweeping spotlight, a flock of birds, a confetti shower, or a beach
+;; ball bouncing in the stand. Purely visual.
+; ~20 s
+(def *show-min-gap* 1200)
+; ~40 s
+(def *show-max-gap* 2400)
+; ~8 s a show lasts
+(def *show-life* 480)
+(def *shows* [:lights :birds :confetti :beachball])
+(def *bird-count* 7)
+(def *confetti-count* 64)
+;; ---- COURT EVENTS (these DO change play) ----------------------------------
+;; A random hazard grips the court for `*event-life*` frames: an EARTHQUAKE jitters
+;; the ball, GRAVITY drags it down, SLOW-MO halves its pace, a MAGNET pulls it to
+;; centre, or TINY shrinks both paddles. One at a time.
+; ~25 s
+(def *event-min-gap* 1500)
+; ~55 s
+(def *event-max-gap* 3300)
+; ~6 s an event lasts
+(def *event-life* 360)
+(def *events* [:quake :gravity :slowmo :magnet :tiny])
+; downward vy pull/frame during GRAVITY
+(def *event-gravity* 0.05)
+; vy pull toward centre/frame during MAGNET
+(def *event-magnet* 0.045)
+; max random vy jolt/frame during an EARTHQUAKE
+(def *event-quake* 0.3)
+; screen shake held during an EARTHQUAKE
+(def *event-quake-shake* 3)
+; ball moves this fraction of its speed during SLOW-MO
+(def *slowmo-scale* 0.5)
+; paddle-height ×multiplier during TINY
+(def *event-tiny* 0.5)
+;; ---- WIND -----------------------------------------------------------------
+;; A gusting breeze [wind-x, wind-y] that eases toward a fresh random target every
+;; `*wind-period*` frames. It nudges the ball each frame (curving its flight — the
+;; AI predicts a straight bounce path, so wind is also a source of honest misses),
+;; and blows a field of faint STREAKS across the court so you can see it.
+; max magnitude of either wind component (cells/frame² nudged onto the ball)
+(def *wind-max* 0.03)
+;; The wind is RELATIVELY CALM by default — most of the time it picks a near-still
+;; target (just the constant `*breeze*` keeping the streaks drifting). The STORM
+;; power-up (`:wind`) flips it into a violent gale for `*wind-gust-frames*`.
+(def *wind-still-chance* 0.65)
+; the tiny target magnitude during a calm spell
+(def *wind-still* 0.004)
+; STORM magnitude (much stronger than `*wind-max*`) while a wind power-up is active
+(def *storm-max* 0.09)
+; frames a STORM lasts after the wind power-up is collected
+(def *wind-gust-frames* 420)
+; frames between new gust targets, and how fast the wind eases toward a target
+(def *wind-period* 200)
+(def *wind-ease* 0.02)
+; number of drifting wind streaks, their length, and cells/frame per unit of wind
+(def *wind-streaks* 48)
+(def *streak-len* 5)
+(def *streak-scale* 45)
+; a faint constant breeze so streaks always drift even in a lull (cells/frame)
+(def *breeze* 0.25)
+;; ---- pure geometry helpers ----
+(defn paddle-h (rows)
+  "Paddle height in rows for a court `rows` tall — `*paddle-frac*` of the court,
+floored at `*paddle-min-h*` so a short window still has a playable paddle."
+  (max *paddle-min-h* (round (* rows *paddle-frac*))))
+
+(defn left-x ()
+  "Left column of the LEFT paddle (its outer edge sits `*paddle-margin*` off the wall)."
+  *paddle-margin*)
+
+(defn right-x (cols)
+  "Left column of the RIGHT paddle in a `cols`-wide court."
+  (- cols *paddle-margin* *paddle-w*))
+
+(defn center (top h)
+  "Centre coordinate of a span of length `h` starting at `top`."
+  (+ top (/ h 2)))
+
+(defn clamp (x lo hi)
+  "Clamp `x` into `[lo, hi]`."
+  (max lo (min hi x)))
+
+(defn court-rows (window-rows)
+  "The PLAYABLE rows for a window `window-rows` tall — the window less the bottom
+`*crowd-rows*` stand (floored so a tiny window still has a court)."
+  (max *paddle-min-h* (- window-rows *crowd-rows*)))
+
+(defn wrapf (v hi)
+  "Wrap float `v` into `[0, hi)` (handles negatives) — toroidal drift for streaks."
+  (- v (* hi (floor (/ v hi)))))
+
+(defn tri (x)
+  "A triangle wave of `x` in `[0,1]` (period 1, peak 1 at x=0.5) — smooth back-and-
+forth motion without trig (for the bouncing beach ball etc.)."
+  (let (f (- x (floor x)))
+    (if (< f 0.5) (* 2 f) (- 2 (* 2 f)))))
+
+;; ---- colour ----
+(defn hsv->rgb (h s v)
+  "An HSV colour (`h` 0–360°, `s`/`v` 0–1) as an `[r g b]` byte vector (0–255) —
+the form a face `:bg`/`:fg` takes. Standard sextant conversion."
+  (let (hp (/ (mod h 360) 60.0)
+        i (floor hp)
+        f (- hp i)
+        p (* v (- 1 s))
+        q (* v (- 1 (* s f)))
+        u (* v (- 1 (* s (- 1 f))))
+        [r g b] (cond
+                  (= i 0) [v u p]
+                  (= i 1) [q v p]
+                  (= i 2) [p v u]
+                  (= i 3) [p q v]
+                  (= i 4) [u p v]
+                  :else [v p q]))
+    [(round (* 255 r)) (round (* 255 g)) (round (* 255 b))]))
+
+;; ---- particle explosions ----
+(defn spawn-burst--acc (s cx cy hue speed n acc)
+  "Cons `n` random particles bursting from `(cx, cy)` onto `acc`, threading PRNG
+`s`; returns `[particles' s']`. Tail-recursive. Velocities are drawn from a
+square around the origin (no trig needed); `vx` is widened ×2 because a cell is
+about half as wide as it is tall, so the spray reads round on screen."
+  (if (= n 0)
+    [acc s]
+    (let ([a s1] (rand-float s)
+          [b s2] (rand-float s1)
+          [c s3] (rand-float s2)
+          [d s4] (rand-float s3)
+          life (round (+ *part-life-min* (* d (- *part-life-max* *part-life-min*))))
+          p {:x cx
+             :y cy
+             :vx (* speed 2 (- (* 2 a) 1))
+             :vy (* speed (- (* 2 b) 1))
+             :life life
+             :max life
+             :hue (mod (+ hue (round (* 120 (- c 0.5)))) 360)})
+      (spawn-burst--acc s4 cx cy hue speed (- n 1) (cons p acc)))))
+
+(defn spawn-burst (st cx cy n speed hue)
+  "Add an `n`-particle explosion at court cell `(cx, cy)`, coloured around `hue`,
+to `st` — threading its PRNG. The new particles are newest-first, so the
+`*part-max*` cap in `step` drops the oldest."
+  (let ([ps s1] (spawn-burst--acc (get st :s) cx cy hue speed n (get st :particles)))
+    (assoc st :particles ps :s s1)))
+
+(defn contact (st x y hue-kick shake freeze n speed)
+  "The shared 'things touched' reaction at court cell `(x, y)`: KICK the master
+hue by `hue-kick` degrees (so the whole palette snaps to new colours), SHAKE the
+court by `shake` cells, FREEZE the world for `freeze` frames (hit-stop), POP the
+ball bright, and spawn an `n`-particle burst in the new hue. Threads the PRNG."
+  (let (hue (mod (+ (get st :hue) hue-kick) 360))
+    (spawn-burst (assoc st
+                   :hue hue
+                   :shake (max (get st :shake) shake)
+                   :freeze (max (get st :freeze) freeze)
+                   :pop *pop-frames*)
+      x
+      y
+      n
+      speed
+      hue)))
+
+;; ---- the announcer ----
+(defn announce (st text hue life)
+  "Post a big centred callout `text` (rendered by `announce-ops`) that punches in
+and fades over `life` frames, tinted by `hue`."
+  (assoc st :announce text :announce-life life :announce-max life :announce-hue hue))
+
+(defn rally-shout (r)
+  "The announcer line for reaching a rally of `r` consecutive paddle hits, or nil
+at a length that isn't a milestone (so most hits stay quiet)."
+  (cond
+    (= r 4) "RALLY!"
+    (= r 7) "HOT STREAK!"
+    (= r 11) "ON FIRE!"
+    (= r 16) "UNREAL!!"
+    (and (> r 16) (= 0 (mod r 5))) (str "INSANE x" r "!")
+    :else nil))
+
+(defn rally-announce (st r)
+  "Fire the rally callout for length `r` if it's a milestone, else leave `st` be."
+  (let (shout (rally-shout r))
+    (if (nil? shout) st (announce st shout (get st :hue) *announce-life*))))
+
+(defn fan-explosion (st)
+  "A fan blows up: pick a random front-row seat, take it + `*fan-victims*`-1
+neighbours out (added to `:abducted`, so they repopulate on the usual respawn
+timer), and set off a big fiery burst, shake and a BOOM! callout. Threads PRNG."
+  (let ([a s1] (rand-float (get st :s))
+        cols (get st :cols)
+        rows (get st :rows)
+        ncols (max 1 (quot cols *crowd-spacing*))
+        idx (round (* a (- ncols 1)))
+        victims (filter (fn (j) (and (>= j 0) (< j ncols)))
+                  (map (fn (k) (+ idx (- k 1))) (range *fan-victims*)))
+        gaps (map (fn (j) {:col (* j *crowd-spacing*) :life *abduct-respawn*}) victims)
+        cx (* idx *crowd-spacing*)
+        cy (+ rows (quot *crowd-rows* 2))
+        boom (assoc st
+               :abducted (concat gaps (get st :abducted))
+               :shake (max (get st :shake) *score-shake*)
+               :s s1)
+        announced (announce boom "BOOM!" 18 *announce-life*))
+    (spawn-burst announced cx cy *score-particles* *score-speed* 18)))
+
+(defn step-particles (ps)
+  "Advance every particle one frame — drift, gravity, drag, age — and drop the
+dead, capped at `*part-max*`. Pure."
+  (take *part-max*
+    (filter (fn (p) (> (get p :life) 0))
+      (map (fn (p)
+             (assoc p
+               :x (+ (get p :x) (get p :vx))
+               :y (+ (get p :y) (get p :vy))
+               :vx (* (get p :vx) *part-drag*)
+               :vy (+ (* (get p :vy) *part-drag*) *part-gravity*)
+               :life (- (get p :life) 1)))
+        ps))))
+
+;; ---- active power-up effects (per side) ----
+(defn side-fx (st side)
+  "The list of active effects on `side` (`:left`/`:right`) — each `{:kind :life}`."
+  (if (= side :left) (get st :l-fx) (get st :r-fx)))
+
+(defn effect-factor (fx kind val)
+  "Multiply `val` into the result once per active effect of `:kind` in `fx` (1.0 if
+none) — how GROW/SHRINK and SPEED/SLOW stack into a single multiplier."
+  (reduce (fn (acc e) (if (= (get e :kind) kind) (* acc val) acc)) 1 fx))
+
+(defn side-ph (st side rows)
+  "Effective paddle height for `side`: the base `paddle-h` scaled by any active
+height effects (GROW/GIANT taller, SHRINK/MINI shorter) and the TINY court event,
+floored at `*paddle-min-h*`."
+  (let (fx (side-fx st side)
+        tiny (if (= (event-kind st) :tiny) *event-tiny* 1)
+        m (* (effect-factor fx :grow *fx-grow*)
+            (effect-factor fx :giant *fx-giant*)
+            (effect-factor fx :shrink *fx-shrink*)
+            (effect-factor fx :mini *fx-mini*)
+            tiny))
+    (max *paddle-min-h* (round (* (paddle-h rows) m)))))
+
+(defn side-speed (st side base)
+  "Paddle move-`base` for `side`, scaled by any speed effects (SPEED/TURBO faster,
+SLOW/FREEZE slower) AND by the crowd: while the stand is cheering the players are
+fired up and move up to `*cheer-speed-boost*`× faster (fading with the cheer)."
+  (let (fx (side-fx st side)
+        cheer-mult (+ 1 (* (/ (get st :cheer) (max 1 *cheer-frames*)) *cheer-speed-boost*)))
+    (* base
+      cheer-mult
+      (effect-factor fx :speed *fx-fast*)
+      (effect-factor fx :turbo *fx-turbo*)
+      (effect-factor fx :slow *fx-slow*)
+      (effect-factor fx :freeze *fx-freeze*))))
+
+(defn blend-rgbs (rgbs)
+  "The channel-wise average of a non-empty list of `[r g b]` colours."
+  (let (n (max 1 (count rgbs))
+        [r g b] (reduce (fn ([ar ag ab] [r2 g2 b2]) [(+ ar r2) (+ ag g2) (+ ab b2)]) [0 0 0] rgbs))
+    [(round (/ r n)) (round (/ g n)) (round (/ b n))]))
+
+(defn paddle-color (st side base)
+  "The paddle's colour for `side`: its fixed `base`, or — when it carries power-ups
+— `base` blended with one colour per active effect (green per good, red per bad),
+so the tint sums up what's on it."
+  (let (fx (side-fx st side))
+    (if (= 0 (count fx))
+      base
+      (blend-rgbs (cons base
+                    (map (fn (e) (hsv->rgb (if (get e :good?) *good-hue* *bad-hue*) 0.85 1.0)) fx))))))
+
+;; ---- the AI players ----
+(defn ai-track (paddle-top target-center rows ph speed)
+  "The next top position for a paddle of height `ph` at `paddle-top` whose centre
+should move toward `target-center`, at most `speed` rows this frame, staying fully
+on the `rows`-tall court."
+  (let (
+        ; top that centres the paddle on the target
+        want (- target-center (/ ph 2))
+        delta (clamp (- want paddle-top) (- 0 speed) speed))
+    (clamp (+ paddle-top delta) 0 (- rows ph))))
+
+(defn reflect (y hi)
+  "Fold `y` into `[0, hi]` as if it bounced off both ends (a triangle wave) — used
+to PREDICT where a ball heading off-axis will actually be after wall bounces."
+  (if (<= hi 0)
+    0
+    (let (p (* 2 hi)
+          r (- y (* p (floor (/ y p)))))
+      ; y mod p, valid for negatives too
+      (if (<= r hi) r (- p r)))))
+
+(defn predict-center (st side rows)
+  "Where the ball's CENTRE will be (row) when it reaches `side`'s paddle face,
+folding in wall bounces — the smarter AI aims here instead of at the ball's
+current y, so it's already waiting where the ball is going."
+  (let (vx (get st :vx)
+        plane (if (= side :left) (+ (left-x) *paddle-w*) (right-x (get st :cols)))
+        frames (if (= vx 0) 0 (/ (abs (- (get st :bx) plane)) (abs vx)))
+        raw (+ (get st :by) (* (get st :vy) frames)))
+    (+ (reflect raw (- rows *ball-h*)) (/ *ball-h* 2))))
+
+;; ---- serving & scoring ----
+(defn serve (st dir)
+  "Recentre the ball and launch it toward `dir` (-1 left, +1 right) at a random
+shallow angle, threading the PRNG seed in `st`. Used at kick-off and after a point."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        [r s1] (rand-float (get st :s))
+        vy (* *serve-vy* (- (* 2 r) 1)))
+    ; r∈[0,1) ⇒ vy∈[-serve-vy, serve-vy)
+    (assoc st
+      :bx (- (/ cols 2) (/ *ball-w* 2))
+      :by (- (/ rows 2) (/ *ball-h* 2))
+      :vx (* dir *ball-vx*)
+      :vy vy
+      :owner nil
+      :in-crowd false
+      ; fresh serve: nobody has hit the ball yet, so no powerup pickups
+      :s s1)))
+
+;; ---- one physics tick ----
+(defn reroll-aim (st)
+  "Re-roll each paddle's aim bias (`:le`/`:re`, rows) to a fresh value in
+`[-e, e]` where `e` is `*aim-error*` paddle-heights, threading the PRNG. Called
+every `*aim-period*` frames from `move-ai`."
+  (let ([a s1] (rand-float (get st :s))
+        [b s2] (rand-float s1)
+        e (* *aim-error* (paddle-h (get st :rows))))
+    (assoc st
+      :le (* (- (* 2 a) 1) e)
+      :re (* (- (* 2 b) 1) e)
+      :s s2)))
+
+(defn paddle-x (st side)
+  "The face column of `side`'s paddle."
+  (if (= side :left) (left-x) (right-x (get st :cols))))
+
+(defn bullet-threat (st side)
+  "The nearest incoming bullet bearing down on `side`'s paddle, within
+`*dodge-frac*` of the court — or nil. (Bullets fired by the other side.)"
+  (let (px (paddle-x st side)
+        range (* (get st :cols) *dodge-frac*))
+    (reduce (fn (best b)
+              (if (and (not (= (get b :side) side))
+                    (let (d (if (= side :left) (- (get b :x) px) (- px (get b :x))))
+                      (and (> d 0) (< d range))))
+                (if (or (nil? best)
+                      (< (abs (- (get b :x) px)) (abs (- (get best :x) px))))
+                  b
+                  best)
+                best))
+      nil
+      (get st :bullets))))
+
+(defn paddle-target (st side ph paddle-top ball-target may-dodge?)
+  "The paddle's aim this frame: normally `ball-target`. Only when `may-dodge?` (it
+ISN'T the paddle currently defending the ball) will it JUKE a paddle-height clear
+of an incoming bullet — defending the ball always comes first, so the AI never
+ducks out of a save to dodge a shot."
+  (let (threat (if may-dodge? (bullet-threat st side) nil))
+    (if (nil? threat)
+      ball-target
+      (let (pc (+ paddle-top (/ ph 2)))
+        (if (< (get threat :y) pc) (+ pc ph) (- pc ph))))))
+
+(defn move-ai (st)
+  "Advance both AI paddles one frame. The DEFENDING paddle (the one the ball is
+heading toward) chases the ball's vertical centre — offset by its aim bias — at
+full `*paddle-speed*`; the idle paddle eases back toward court centre at the
+slower `*return-speed*`. The bias (re-rolled periodically) and that
+defend/retreat asymmetry are what make the AI beatable: an off-centre hit sends
+a steep return that can reach the far corner before the once-idle paddle has
+climbed out of the middle."
+  (let (st0 (if (= 0 (mod (get st :t) *aim-period*)) (reroll-aim st) st)
+        rows (get st0 :rows)
+        lph (side-ph st0 :left rows)
+        rph (side-ph st0 :right rows)
+        mid (/ rows 2)
+        vx (get st0 :vx)
+        ; ball heading left ⇒ the left paddle must defend
+        l-defend (< vx 0)
+        r-defend (> vx 0)
+        ;; a paddle a streaker splatted is FROZEN — it holds position until it thaws
+        l-frozen (> (get st0 :l-frozen) 0)
+        r-frozen (> (get st0 :r-frozen) 0))
+    (assoc st0
+      :t (+ (get st0 :t) 1)
+      :l-frozen (max 0 (- (get st0 :l-frozen) 1))
+      :r-frozen (max 0 (- (get st0 :r-frozen) 1))
+      ;; the DEFENDER anticipates the ball's bounce-folded arrival (smarter), the
+      ;; idle paddle eases to centre; both nudged by their aim bias. A frozen paddle
+      ;; can't move at all.
+      :lp (if l-frozen
+            (get st0 :lp)
+            (ai-track (get st0 :lp)
+              ;; chase the ball; only the IDLE paddle may dodge incoming fire
+              (paddle-target st0
+                :left
+                lph
+                (get st0 :lp)
+                (if l-defend (+ (predict-center st0 :left rows) (get st0 :le)) mid)
+                (not l-defend))
+              rows
+              lph
+              (side-speed st0 :left (if l-defend *paddle-speed* *return-speed*))))
+      :rp (if r-frozen
+            (get st0 :rp)
+            (ai-track (get st0 :rp)
+              (paddle-target st0
+                :right
+                rph
+                (get st0 :rp)
+                (if r-defend (+ (predict-center st0 :right rows) (get st0 :re)) mid)
+                (not r-defend))
+              rows
+              rph
+              (side-speed st0 :right (if r-defend *paddle-speed* *return-speed*)))))))
+
+(defn overlap? (by paddle-top ph)
+  "Does the ball (top `by`, height `*ball-h*`) vertically overlap a paddle
+(top `paddle-top`, height `ph`)? Standard 1-D interval overlap."
+  (and (< by (+ paddle-top ph)) (> (+ by *ball-h*) paddle-top)))
+
+(defn english (by paddle-top ph)
+  "The return `vy` (rows/frame) from a paddle hit: proportional to how far the
+ball's centre is from the paddle's centre (its 'english'), capped at `*max-vy*`
+and floored at `*min-vy*` in magnitude so the ball is never dead-flat (which
+would rally forever). A centre hit returns the gentle minimum; an edge hit steep."
+  (let (off (/ (- (center by *ball-h*) (center paddle-top ph)) (/ ph 2)))
+    (let (v (clamp (* off *english* *max-vy*) (- 0 *max-vy*) *max-vy*))
+      (cond
+        (>= v *min-vy*) v
+        (<= v (- 0 *min-vy*)) v
+        (>= v 0) *min-vy*
+        :else (- 0 *min-vy*)))))
+
+(defn splat-seat-under (st)
+  "Splat the one spectator directly under the ball (a gap that repopulates) — the
+ball carving a path as it travels through the stand."
+  (let (cols (get st :cols)
+        ncols (max 1 (quot cols *crowd-spacing*))
+        idx (clamp (round (/ (center (get st :bx) *ball-w*) *crowd-spacing*)) 0 (- ncols 1)))
+    (assoc st
+      :abducted (cons {:col (* idx *crowd-spacing*) :life *abduct-respawn*} (get st :abducted)))))
+
+(defn crowd-crash (st)
+  "A fast ball PUNCHES THROUGH the bottom wall and DIVES into the stand: it keeps
+going (a downward plunge, `:in-crowd`), splats `*crash-victims*` spectators on entry,
+loses pace, and fires a CRASH! callout + burst. `bounce-walls` then carves it
+through the crowd and bounces it back off the stand floor into play."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        ncols (max 1 (quot cols *crowd-spacing*))
+        idx (round (/ (get st :bx) *crowd-spacing*))
+        victims (filter (fn (j) (and (>= j 0) (< j ncols)))
+                  (map (fn (k) (+ idx (- k 1))) (range *crash-victims*)))
+        gaps (map (fn (j) {:col (* j *crowd-spacing*) :life *abduct-respawn*}) victims)
+        cy (+ rows (quot *crowd-rows* 2))
+        smashed (assoc st
+                  :abducted (concat gaps (get st :abducted))
+                  :in-crowd true
+                  :vx (* (get st :vx) *crash-slow*)
+                  :vy (* 0.6 *max-vy*)
+                  ; plunge downward into the stand
+                  :shake (max (get st :shake) *score-shake*))
+        announced (announce smashed "CRASH!" 25 *announce-life*))
+    (spawn-burst announced (center (get st :bx) *ball-w*) cy *score-particles* *score-speed* 25)))
+
+(defn bounce-walls (st)
+  "Reflect the ball off the top and bottom walls (clamping it back in bounds so a
+fast ball can't tunnel through), and fire a `contact` reaction at the wall. A FAST
+ball off the BOTTOM wall has a `*crash-chance*` to smash through into the crowd."
+  (let (by (get st :by)
+        rows (get st :rows)
+        vy (get st :vy)
+        cx (center (get st :bx) *ball-w*)
+        floor (+ rows *crowd-rows*))
+    (cond
+      (< by 0) (contact (assoc st :by (- 0 by) :vy (- 0 vy))
+                 cx
+                 0
+                 *wall-hue-kick*
+                 *wall-shake*
+                 0
+                 *wall-particles*
+                 *wall-speed*)
+      ;; the ball is DOWN IN THE STAND: carve through the crowd, bounce off the
+      ;; stand floor, and return to play once it climbs back above the court line.
+      (get st :in-crowd) (let (st1 (splat-seat-under st))
+                           (cond
+                             (> (+ (get st1 :by) *ball-h*) floor) (assoc st1
+                                                                    :by (- floor *ball-h*)
+                                                                    :vy (- 0 (abs vy))
+                                                                    :shake (max (get st1 :shake)
+                                                                             *wall-shake*))
+                             (<= (+ (get st1 :by) *ball-h*) rows) (assoc st1 :in-crowd false)
+                             :else st1))
+      (> (+ by *ball-h*) rows) (let ([roll s1] (rand-float (get st :s)))
+                                 (if (and (> (abs (get st :vx)) *crash-speed*)
+                                       (< roll *crash-chance*))
+                                   ; dive INTO the crowd (no reflect)
+                                   (crowd-crash (assoc st :s s1))
+                                   (contact (assoc st :by (- rows *ball-h*) :vy (- 0 vy) :s s1)
+                                     cx
+                                     rows
+                                     *wall-hue-kick*
+                                     *wall-shake*
+                                     0
+                                     *wall-particles*
+                                     *wall-speed*)))
+      :else st)))
+
+(defn deflect (st new-bx paddle-top ph speed)
+  "Bounce the ball off a paddle: pin it to the face at `new-bx`, reverse its
+horizontal direction at magnitude `speed` (the momentum/charge-set pace), and take
+its new `vy` from where it struck (`english`)."
+  (assoc st
+    :bx new-bx
+    :vx (* (if (< (get st :vx) 0) 1 -1) speed)
+    :vy (english (get st :by) paddle-top ph)))
+
+(defn return-speed-for (cur charged?)
+  "The outgoing ball speed for a hit on a ball currently moving at `|vx| = cur`:
+a CHARGED hit multiplies the pace (capped at `*charge-max*`); a normal hit keeps
+`*momentum-keep*` of the excess over base, so pace bleeds back toward `*ball-vx*`."
+  (if charged?
+    (min *charge-max* (* (max cur *ball-vx*) *charge-boost*))
+    (+ *ball-vx* (* (- cur *ball-vx*) *momentum-keep*))))
+
+(defn paddle-hit (st new-bx paddle-top ph x by)
+  "Resolve a paddle hit at face `x`: roll the tiny CHARGE window (per player), set
+the return pace (charged ⇒ faster, else momentum bleeds toward base), deflect,
+bump the RALLY counter, fire callouts, and `contact` with intensity that BUILDS
+with the rally. A charged hit gets its own louder callout + shake."
+  (let (r (+ (get st :rally) 1)
+        [roll s1] (rand-float (get st :s))
+        charged? (< roll *charge-chance*)
+        speed (return-speed-for (abs (get st :vx)) charged?)
+        n (min *part-max* (+ *hit-particles* (* r *rally-particle-step*)))
+        shake (+ *hit-shake* (min *rally-shake-cap* (* r *rally-shake-step*)) (if charged? 3 0))
+        ;; `:rally` is the live SHOT COUNT of this rally — bumped on every paddle hit;
+        ;; a charged hit also lights the `:charge-glow` graphic on the ball
+        deflected (assoc (deflect (assoc st :s s1) new-bx paddle-top ph speed)
+                    :rally r
+                    :charge-glow (if charged? *charge-glow-frames* (get st :charge-glow)))
+        announced (if charged?
+                    (announce deflected "CHARGED!" (get deflected :hue) *announce-life*)
+                    (rally-announce deflected r))
+        hit (contact announced
+              x
+              (center by *ball-h*)
+              *hit-hue-kick*
+              shake
+              *hit-freeze*
+              n
+              *hit-speed*)
+        ;; past the threshold, each hit risks a fan blowing up in the stands
+        [froll s2] (rand-float (get hit :s)))
+    (if (and (> r *fan-threshold*) (< froll *fan-chance*))
+      (fan-explosion (assoc hit :s s2))
+      (assoc hit :s s2))))
+
+(defn bounce-paddles (st)
+  "Reflect the ball off whichever paddle it is reaching INTO this frame: a
+leftward ball at the left paddle's face that vertically overlaps it returns
+rightward (and vice-versa). A miss is left alone — the ball sails past the face
+and `score` turns it into a point."
+  (let (rows (get st :rows)
+        cols (get st :cols)
+        lph (side-ph st :left rows)
+        rph (side-ph st :right rows)
+        bx (get st :bx)
+        by (get st :by)
+        vx (get st :vx)
+        lx (left-x)
+        rx (right-x cols)
+        ;; a BROKEN paddle (shot twice) can't block — the ball sails through it
+        hit-left? (and (< (get st :l-dmg) 2)
+                    (< vx 0)
+                    (<= bx (+ lx *paddle-w*))
+                    (>= bx lx)
+                    (overlap? by (get st :lp) lph))
+        hit-right? (and (< (get st :r-dmg) 2)
+                     (> vx 0)
+                     (>= (+ bx *ball-w*) rx)
+                     (<= (+ bx *ball-w*) (+ rx *paddle-w*))
+                     (overlap? by (get st :rp) rph)))
+    (cond
+      ;; record the OWNER (this paddle now owns the ball for powerup pickups)
+      hit-left? (paddle-hit (assoc st :owner :left)
+                  (+ lx *paddle-w*)
+                  (get st :lp)
+                  lph
+                  (+ lx *paddle-w*)
+                  by)
+      hit-right? (paddle-hit (assoc st :owner :right) (- rx *ball-w*) (get st :rp) rph rx by)
+      :else st)))
+
+(defn point (st scorer x dir)
+  "Award a point to `scorer` (`:left`/`:right`), exiting at `x` and re-serving
+toward `dir`. Resets the rally, kicks the hue to a fresh palette, flashes the
+court, throws the biggest shake + freeze + explosion, and announces the moment.
+Reaching `*win-score*` declares the winner (a giant, lingering callout + an even
+bigger blast) and resets the score for a fresh match."
+  (let (ls (if (= scorer :left) (+ (get st :ls) 1) (get st :ls))
+        rs (if (= scorer :right) (+ (get st :rs) 1) (get st :rs))
+        win? (>= (if (= scorer :left) ls rs) *win-score*)
+        hue (mod (+ (get st :hue) *score-hue-kick*) 360)
+        text (if win? (str (if (= scorer :left) "LEFT" "RIGHT") " WINS!") "POINT!")
+        ; the crowd goes wild
+        boom (assoc st
+               :ls (if win? 0 ls)
+               :rs (if win? 0 rs)
+               :rally 0
+               :hue hue
+               :flash *flash-frames*
+               :flash-hue hue
+               :shake (max (get st :shake) (if win? (* *score-shake* 1.7) *score-shake*))
+               :pop *pop-frames*
+               :freeze (if win? *win-freeze* *score-freeze*)
+               :l-dmg 0
+               ; paddles are repaired each point ("you get it back when you lose")
+               :r-dmg 0
+               :cheer (if win? (* *cheer-frames* 2) *cheer-frames*))
+        announced (announce boom text hue (if win? *win-announce-life* *announce-life*))
+        n (if win? (* *score-particles* 2) *score-particles*))
+    (serve (spawn-burst announced x (center (get st :by) *ball-h*) n *score-speed* hue) dir)))
+
+(defn score (st)
+  "Award a point to whichever player the ball got past (and celebrate), else leave
+`st` be. Serving toward the conceder keeps the rally alternating."
+  (let (bx (get st :bx) cols (get st :cols))
+    (cond
+      (< (+ bx *ball-w*) 0) (point st :right 0 1)
+      (> bx cols) (point st :left cols -1)
+      :else st)))
+
+;; ---- power-up tokens ----
+(defn spawn-powerup (st)
+  "Drop one random token into the central play area at a random height, threading
+the PRNG. Carries its catalog entry plus `:x`/`:y`/`:life`."
+  (let ([k s1] (sample (get st :s) *powerups*)
+        [rx s2] (rand-float s1)
+        [ry s3] (rand-float s2)
+        cols (get st :cols)
+        rows (get st :rows)
+        x (+ (* cols 0.32) (* rx (* cols 0.36)))
+        y (+ (* rows 0.12) (* ry (* rows 0.76))))
+    (assoc st
+      :tokens (cons (assoc k :x x :y y :life *powerup-life*) (get st :tokens))
+      :s s3)))
+
+(defn token-hit? (st tok)
+  "Does the ball's box overlap token `tok`'s box? (AABB.)"
+  (and (< (get st :bx) (+ (get tok :x) *powerup-w*))
+    (> (+ (get st :bx) *ball-w*) (get tok :x))
+    (< (get st :by) (+ (get tok :y) *powerup-h*))
+    (> (+ (get st :by) *ball-h*) (get tok :y))))
+
+(defn apply-powerup (st tok)
+  "Award `tok` to the ball's OWNER. Most tokens buff/curse that paddle; `:wind`
+whips the whole court into a STORM; `:ammo` loads that side's gun with shots.
+Assumes an owner exists (the caller only collects once a paddle has the ball)."
+  (cond
+    (= (get tok :kind) :wind) (announce (spawn-burst (assoc st
+                                                       :wind-gust *wind-gust-frames*
+                                                       :shake (max (get st :shake) *hit-shake*))
+                                          (get tok :x)
+                                          (get tok :y)
+                                          *hit-particles*
+                                          *hit-speed*
+                                          210)
+                                "STORM!"
+                                210
+                                *announce-life*)
+    (= (get tok :kind) :ammo) (let (ammo-key (if (= (get st :owner) :left) :l-ammo :r-ammo))
+                                (announce (spawn-burst (assoc st
+                                                         ammo-key (+ (get st ammo-key)
+                                                                    *ammo-per-pickup*)
+                                                         :pop *pop-frames*)
+                                            (get tok :x)
+                                            (get tok :y)
+                                            *hit-particles*
+                                            *hit-speed*
+                                            120)
+                                  "AMMO!"
+                                  120
+                                  *announce-life*))
+    :else (apply-effect-powerup st tok)))
+
+(defn apply-effect-powerup (st tok)
+  "Award a paddle-effect token to the ball's owner: add its timed effect to that
+side, then announce + spark it (green for good, red for bad)."
+  (let (owner (get st :owner)
+        fx-key (if (= owner :left) :l-fx :r-fx)
+        ;; carry the glyph/good? on the effect so the HUD indicator can draw it
+        eff {:kind (get tok :kind)
+             :life *fx-life*
+             :glyph (get tok :glyph)
+             :good? (get tok :good?)}
+        hue (if (get tok :good?) *good-hue* *bad-hue*)
+        text (str (get tok :name) (if (get tok :good?) "!" "?"))
+        powered (assoc st
+                  fx-key (cons eff (side-fx st owner))
+                  :shake (max (get st :shake) *hit-shake*)
+                  :pop *pop-frames*))
+    (announce (spawn-burst powered (get tok :x) (get tok :y) *hit-particles* *hit-speed* hue)
+      text
+      hue
+      *announce-life*)))
+
+(defn collect-powerups (st)
+  "Hand every token the ball is touching to its owner (apply + remove), leaving
+the rest on court. A no-op until a paddle has owned the ball."
+  (let (owner (get st :owner)
+        toks (get st :tokens))
+    (if (nil? owner)
+      st
+      (let (hits (filter (fn (t) (token-hit? st t)) toks)
+            rest (filter (fn (t) (not (token-hit? st t))) toks))
+        (reduce apply-powerup (assoc st :tokens rest) hits)))))
+
+(defn step-tokens (st)
+  "Age tokens (dropping expired ones) and, on the spawn timer, drop a fresh one
+while under `*powerup-max*`."
+  (let (toks (filter (fn (t) (> (get t :life) 0))
+               (map (fn (t) (assoc t :life (- (get t :life) 1))) (get st :tokens)))
+        timer (- (get st :pu-timer) 1)
+        st1 (assoc st :tokens toks :pu-timer timer))
+    (if (and (<= timer 0) (< (count toks) *powerup-max*))
+      (assoc (spawn-powerup st1) :pu-timer *powerup-every*)
+      st1)))
+
+(defn age-effects (st)
+  "Tick down both sides' active effects, dropping any that have expired."
+  (let (age (fn (fx)
+              (filter (fn (e) (> (get e :life) 0))
+                (map (fn (e) (assoc e :life (- (get e :life) 1))) fx))))
+    (assoc st :l-fx (age (get st :l-fx)) :r-fx (age (get st :r-fx)))))
+
+;; ---- wind ----
+(defn clamp-vx (vx)
+  "Keep the ball's horizontal speed in a safe band (sign preserved): fast enough to
+keep crossing, up to `*charge-max*` (a charged shot's pace) which stays under
+`*paddle-w*` so it can never tunnel through a paddle."
+  (* (if (< vx 0) -1 1) (clamp (abs vx) (* 0.6 *ball-vx*) *charge-max*)))
+
+(defn step-wind (st)
+  "Ease the wind toward its target, re-rolling that target every `*wind-period*`
+frames. Normally CALM (mostly near-still); while a STORM (`:wind-gust`) is active
+every target is a violent `*storm-max*` gale. Threads the PRNG."
+  (let (storm? (> (get st :wind-gust) 0)
+        timer (- (get st :wind-timer) 1)
+        [st1 timer1] (if (> timer 0)
+                       [st timer]
+                       ;; roll a new target: in a storm always a strong gale, else
+                       ;; mostly a CALM near-zero target, occasionally a mild gust
+                       (let ([p s1] (rand-float (get st :s))
+                             [a s2] (rand-float s1)
+                             [b s3] (rand-float s2)
+                             mag (cond
+                                   storm? *storm-max*
+                                   (< p *wind-still-chance*) *wind-still*
+                                   :else *wind-max*))
+                         [(assoc st
+                            :wind-tx (* (- (* 2 a) 1) mag)
+                            :wind-ty (* (- (* 2 b) 1) mag)
+                            :s s3) (if storm?
+                                                                                                                                                                                               (quot *wind-period*
+                                                                                                                                                                                                 2)
+                                                                                                                                                                                               *wind-period*)]))
+        ease (fn (cur tgt) (+ cur (* *wind-ease* (- tgt cur)))))
+    (assoc st1
+      :wind-x (ease (get st1 :wind-x) (get st1 :wind-tx))
+      :wind-y (ease (get st1 :wind-y) (get st1 :wind-ty))
+      :wind-timer timer1
+      :wind-gust (max 0 (- (get st :wind-gust) 1)))))
+
+(defn step-streaks (st)
+  "Drift every wind streak by the breeze + current wind, wrapping around the
+court — the visible airflow."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        vx (+ *breeze* (* (get st :wind-x) *streak-scale*))
+        vy (* (get st :wind-y) *streak-scale*))
+    (assoc st
+      :streaks (map (fn (p)
+                      {:x (wrapf (+ (get p :x) vx) cols) :y (wrapf (+ (get p :y) vy) rows)})
+                 (get st :streaks)))))
+
+(defn init-streaks (cols rows)
+  "A field of `*wind-streaks*` streaks scattered deterministically across the court."
+  (map (fn (i) {:x (mod (* i 73) cols) :y (mod (* i 137) rows)}) (range *wind-streaks*)))
+
+;; ---- aliens (UFO abductions) ----
+(defn next-check-timer (s)
+  "Frames until the next rare-event roll: `*event-check*` (≈1 min) ± up to
+`*event-jitter*`. Returns `[frames next-seed]`."
+  (let ([r s1] (rand-float s))
+    [(round (+ *event-check* (* (- (* 2 r) 1) *event-jitter*))) s1]))
+
+(defn step-event (st timer-key spawn-fn)
+  "Shared rare-event clock for the UFO / streaker: count `timer-key` down, and
+when it reaches 0 roll once — with `*event-chance*` run `spawn-fn` (which spawns
+the thing), otherwise nothing — then reset the timer to the next ~1-min check.
+Returns the updated `st`."
+  (let (timer (- (get st timer-key) 1))
+    (if (> timer 0)
+      (assoc st timer-key timer)
+      (let ([roll s1] (rand-float (get st :s))
+            [nt s2] (next-check-timer s1)
+            ticked (assoc st :s s2 timer-key nt))
+        (if (< roll *event-chance*) (spawn-fn ticked) ticked)))))
+
+(defn spawn-ufo (st)
+  "Launch a UFO in from one side (random), targeting a random front-row seat
+column in the middle of the stand. Threads the PRNG."
+  (let ([a s1] (rand-float (get st :s))
+        [b s2] (rand-float s1)
+        cols (get st :cols)
+        from-left? (< a 0.5)
+        ncols (max 1 (quot cols *crowd-spacing*))
+        idx (+ (round (* ncols 0.2)) (round (* b (* ncols 0.6))))
+        target (* idx *crowd-spacing*))
+    (assoc st
+      :ufo {:x (if from-left? (- 0 *ufo-w*) cols)
+            :vx (if from-left? *ufo-speed* (- 0 *ufo-speed*))
+            :target target
+            :grabbed false}
+      :s s2)))
+
+(defn step-ufo (st)
+  "Advance the alien subsystem: respawn any abductees whose timer ran out, then
+either count down to the next UFO (none active) or fly the current one across —
+ABDUCTING its target seat as it passes over, and despawning off the far side."
+  (let (abd (filter (fn (a) (> (get a :life) 0))
+              (map (fn (a) (assoc a :life (- (get a :life) 1))) (get st :abducted)))
+        st1 (assoc st :abducted abd)
+        ufo (get st :ufo))
+    (if (nil? ufo)
+      ; ~once a minute, 30% chance to appear
+      (step-event st1 :ufo-timer spawn-ufo)
+      (let (x2 (+ (get ufo :x) (get ufo :vx))
+            cx (+ x2 (quot *ufo-w* 2))
+            passed? (if (> (get ufo :vx) 0) (>= cx (get ufo :target)) (<= cx (get ufo :target)))
+            grab? (and (not (get ufo :grabbed)) passed?)
+            abd2 (if grab? (cons {:col (get ufo :target) :life *abduct-respawn*} abd) abd)
+            gone? (or (< x2 (- 0 *ufo-w* 2)) (> x2 (+ (get st :cols) 2))))
+        (if gone?
+          ; the check timer keeps ticking for the next one
+          (assoc st1 :ufo nil :abducted abd2)
+          (assoc st1
+            :ufo (assoc ufo :x x2 :grabbed (or (get ufo :grabbed) grab?))
+            :abducted abd2))))))
+
+;; ---- the streaker ----
+(defn next-streaker-timer (s)
+  "Frames until the next streaker — a `*streaker-min-gap*`..`*streaker-max-gap*`
+gap (≈15–35 s, often enough to see). Returns `[frames next-seed]`."
+  (let ([r s1] (rand-float s))
+    [(round (+ *streaker-min-gap* (* r (- *streaker-max-gap* *streaker-min-gap*)))) s1]))
+
+(defn spawn-streaker (st)
+  "A streaker BURSTS OUT OF THE CROWD: pick a random front-row seat, open a gap
+there (added to `:abducted`, so it repopulates on the usual timer), and start the
+figure at that seat — climbing up onto the court (`:vy`) toward a run height
+(`:ty`) then bolting across (toward the far side). Threads the PRNG."
+  (let ([a s1] (rand-float (get st :s))
+        [b s2] (rand-float s1)
+        cols (get st :cols)
+        rows (get st :rows)
+        ncols (max 1 (quot cols *crowd-spacing*))
+        idx (round (* a (- ncols 1)))
+        c (* idx *crowd-spacing*))
+    (assoc st
+      :streaker {:x c
+                 :vx (if (< c (/ cols 2)) *streaker-speed* (- 0 *streaker-speed*))
+                 ; start at the court's bottom edge, body still in the stand
+                 :y rows
+                 :vy (- 0 *streaker-climb*)
+                 ; climb to this run height
+                 :ty (+ (* rows 0.38) (* b (* rows 0.34)))
+                 :bumped false}
+      :abducted (cons {:col c :life *abduct-respawn*} (get st :abducted))
+      :s s2)))
+
+(defn streaker-hit? (st)
+  "Is the ball overlapping the (un-bumped) streaker? AABB."
+  (let (sk (get st :streaker))
+    (and sk
+      (not (get sk :bumped))
+      (< (get st :bx) (+ (get sk :x) *streaker-w*))
+      (> (+ (get st :bx) *ball-w*) (get sk :x))
+      (< (get st :by) (+ (get sk :y) *streaker-h*))
+      (> (+ (get st :by) *ball-h*) (get sk :y)))))
+
+(defn streaker-bounce (st)
+  "The streaker whacks the ball back like a PADDLE: reverse its horizontal
+direction (keeping pace), set `vy` from where it struck their body, and shove it
+clear so it can't immediately re-hit. Marks `:bumped` so it only acts once."
+  (let (sk (get st :streaker)
+        scy (+ (get sk :y) (/ *streaker-h* 2))
+        off (clamp (/ (- (center (get st :by) *ball-h*) scy) (/ *streaker-h* 2)) -1 1)
+        left? (< (get st :vx) 0)
+        bounced (assoc st
+                  :vx (* (if left? 1 -1) (abs (get st :vx)))
+                  :vy (clamp (* off *max-vy*) (- 0 *max-vy*) *max-vy*)
+                  :bx (if left? (+ (get sk :x) *streaker-w*) (- (get sk :x) *ball-w*))
+                  :streaker (assoc sk :bumped true)
+                  :shake (max (get st :shake) *hit-shake*)
+                  :pop *pop-frames*)
+        announced (announce bounced "STREAKER!" 315 *announce-life*))
+    (spawn-burst announced (get st :bx) (get st :by) *hit-particles* *hit-speed* 315)))
+
+(defn streaker-kill (st)
+  "The ball SPLATS the streaker: they're killed (removed) and the ball passes
+straight through, leaving a red burst + a SPLAT! callout + a shake."
+  (let (sk (get st :streaker)
+        killed (assoc st :streaker nil :shake (max (get st :shake) *score-shake*) :pop *pop-frames*)
+        announced (announce killed "SPLAT!" 0 *announce-life*))
+    (spawn-burst announced (+ (get sk :x) 1) (+ (get sk :y) 2) *score-particles* *score-speed* 0)))
+
+(defn streaker-contact (st)
+  "Ball met streaker — a coin flip: 50% the streaker is killed (ball through),
+50% they bat it back like a paddle. Threads the PRNG."
+  (let ([r s1] (rand-float (get st :s))
+        st1 (assoc st :s s1))
+    (if (< r 0.5) (streaker-kill st1) (streaker-bounce st1))))
+
+(defn streaker-paddle-hit (st)
+  "Which paddle (`:left`/`:right`) the streaker is colliding with, or nil — AABB
+between the streaker figure and the (effect-sized) paddle box."
+  (let (sk (get st :streaker)
+        rows (get st :rows)
+        cols (get st :cols)
+        sx (get sk :x)
+        sy (get sk :y)
+        lx (left-x)
+        rx (right-x cols)
+        lph (side-ph st :left rows)
+        rph (side-ph st :right rows))
+    (cond
+      (and (< sx (+ lx *paddle-w*))
+        (> (+ sx *streaker-w*) lx)
+        (< sy (+ (get st :lp) lph))
+        (> (+ sy *streaker-h*) (get st :lp))) :left
+      (and (< sx (+ rx *paddle-w*))
+        (> (+ sx *streaker-w*) rx)
+        (< sy (+ (get st :rp) rph))
+        (> (+ sy *streaker-h*) (get st :rp))) :right
+      :else nil)))
+
+(defn streaker-splat-paddle (st side)
+  "The streaker slams into a paddle: they SPLAT (killed) and that paddle is FROZEN
+for `*paddle-freeze-frames*` — a red burst + a FROZEN! callout + shake."
+  (let (sk (get st :streaker)
+        key (if (= side :left) :l-frozen :r-frozen)
+        frozen (assoc st
+                 :streaker nil
+                 key *paddle-freeze-frames*
+                 :shake (max (get st :shake) *score-shake*))
+        announced (announce frozen "FROZEN!" 195 *announce-life*))
+    (spawn-burst announced (get sk :x) (get sk :y) *score-particles* *score-speed* 195)))
+
+(defn step-streaker (st)
+  "Advance the streaker: when none is out, count down its (frequent) timer and run
+one on; otherwise run the current one across — splatting into a paddle (freezing
+it), or resolving a ball collision 50/50 (kill vs bat-back) — and despawn off the
+far side, rolling a fresh delay."
+  (let (sk (get st :streaker))
+    (if (nil? sk)
+      (let (timer (- (get st :streaker-timer) 1))
+        (if (<= timer 0)
+          (spawn-streaker st)
+          (assoc st :streaker-timer timer)))
+      (let (x2 (+ (get sk :x) (get sk :vx))
+            ;; climb up out of the stand until the run height `:ty`, then run flat
+            y2 (max (get sk :ty) (+ (get sk :y) (get sk :vy)))
+            st1 (assoc st :streaker (assoc sk :x x2 :y y2))
+            gone? (or (< x2 (- 0 *streaker-w* 2)) (> x2 (+ (get st :cols) 2)))
+            pside (streaker-paddle-hit st1))
+        (cond
+          gone? (let ([nt s2] (next-streaker-timer (get st :s)))
+                  (assoc st :streaker nil :streaker-timer nt :s s2))
+          pside (streaker-splat-paddle st1 pside)
+          (streaker-hit? st1) (streaker-contact st1)
+          :else st1)))))
+
+;; ---- crowd signs ----
+(defn spawn-signs--acc (s n cols rows acc)
+  "Cons `n` random placards onto `acc` (text/hue/position/lifetime), threading the
+PRNG. Tail-recursive; returns `[signs s']`."
+  (if (= n 0)
+    [acc s]
+    (let ([a s1] (rand-float s)
+          [b s2] (rand-float s1)
+          [c s3] (rand-float s2)
+          [d s4] (rand-float s3)
+          text (vector-ref *signs-text* (mod (round (* a 100000)) (count *signs-text*)))
+          life (+ *sign-life* (round (* (- (* 2 c) 1) *sign-life-jitter*)))
+          sign {:x (+ (round (* cols 0.05)) (round (* b (* cols 0.85))))
+                :y (+ rows 1 (round (* d 3)))
+                :text text
+                :hue (round (* a 360))
+                :life life
+                :max life})
+      (spawn-signs--acc s4 (- n 1) cols rows (cons sign acc)))))
+
+(defn spawn-signs (st)
+  "Pop up a fresh batch of `*sign-min*`..`*sign-max*` placards across the stand."
+  (let ([r s1] (rand-float (get st :s))
+        n (+ *sign-min* (round (* r (- *sign-max* *sign-min*))))
+        [signs s2] (spawn-signs--acc s1 n (get st :cols) (get st :rows) (get st :signs)))
+    (assoc st :signs signs :s s2)))
+
+(defn step-signs (st)
+  "Age the held-up placards (dropping any whose ~10 s elapsed). While a batch is
+up, hold the gap timer; once they've all dropped, count the short gap down and
+pop a fresh batch."
+  (let (alive (filter (fn (sg) (> (get sg :life) 0))
+                (map (fn (sg) (assoc sg :life (- (get sg :life) 1))) (get st :signs))))
+    (if (> (count alive) 0)
+      (assoc st :signs alive :sign-timer *sign-gap*)
+      (let (timer (- (get st :sign-timer) 1))
+        (if (<= timer 0)
+          (spawn-signs (assoc st :signs alive))
+          (assoc st :signs alive :sign-timer timer))))))
+
+;; ---- crowd shows (cosmetic) ----
+(defn spawn-show (st)
+  "Begin a random cosmetic crowd show (`*shows*`) for `*show-life*` frames."
+  (let ([a s1] (rand-float (get st :s))
+        kind (vector-ref *shows* (mod (round (* a 100000)) (count *shows*))))
+    (assoc st :show {:kind kind :life *show-life*} :s s1)))
+
+(defn step-show (st)
+  "Tick the active crowd show down (clearing it when done), or count the gap timer
+and start a fresh random show. Cosmetic only."
+  (let (show (get st :show))
+    (if show
+      (let (life (- (get show :life) 1))
+        (if (<= life 0) (assoc st :show nil) (assoc st :show (assoc show :life life))))
+      (let (timer (- (get st :show-timer) 1))
+        (if (> timer 0)
+          (assoc st :show-timer timer)
+          (let ([r s1] (rand-float (get st :s))
+                nt (round (+ *show-min-gap* (* r (- *show-max-gap* *show-min-gap*)))))
+            (assoc (spawn-show (assoc st :s s1)) :show-timer nt)))))))
+
+;; ---- court events (these change play) ----
+(defn event-name (kind)
+  "The announcer headline for a court event `kind`."
+  (cond
+    (= kind :quake) "EARTHQUAKE!"
+    (= kind :gravity) "GRAVITY!"
+    (= kind :slowmo) "SLOW-MO!"
+    (= kind :magnet) "MAGNET!"
+    (= kind :tiny) "TINY PADDLES!"
+    :else "EVENT!"))
+
+(defn event-kind (st)
+  "The active court-event kind, or nil."
+  (let (e (get st :event)) (if (nil? e) nil (get e :kind))))
+
+(defn spawn-court-event (st)
+  "Begin a random court event (`*events*`) for `*event-life*` frames, announcing it."
+  (let ([a s1] (rand-float (get st :s))
+        kind (vector-ref *events* (mod (round (* a 100000)) (count *events*))))
+    (announce (assoc st :event {:kind kind :life *event-life*} :s s1)
+      (event-name kind)
+      30
+      *announce-life*)))
+
+(defn step-court-event (st)
+  "Tick the active court event down (clearing it when done), or count the gap timer
+and start a fresh random one. The event's PHYSICS are applied in `step`."
+  (let (e (get st :event))
+    (if e
+      (let (life (- (get e :life) 1))
+        (if (<= life 0) (assoc st :event nil) (assoc st :event (assoc e :life life))))
+      (let (timer (- (get st :event-timer) 1))
+        (if (> timer 0)
+          (assoc st :event-timer timer)
+          (let ([r s1] (rand-float (get st :s))
+                nt (round (+ *event-min-gap* (* r (- *event-max-gap* *event-min-gap*)))))
+            (assoc (spawn-court-event (assoc st :s s1)) :event-timer nt)))))))
+
+;; ---- shooting ----
+(defn fire-bullet (st side)
+  "Fire one bullet from `side`'s paddle toward the opponent, spending an ammo. With
+`*aim-true-chance*` it LEADS the target — aimed where the opponent paddle will be
+when the bullet arrives (their predicted ball-intercept, or centre when idle) —
+else it sprays to a random height. Threads the PRNG."
+  (let ([a s1] (rand-float (get st :s))
+        [b s2] (rand-float s1)
+        cols (get st :cols)
+        rows (get st :rows)
+        opp (if (= side :left) :right :left)
+        opp-defending (if (= side :left) (> (get st :vx) 0) (< (get st :vx) 0))
+        lead (if opp-defending (predict-center st opp rows) (/ rows 2))
+        y (if (< a *aim-true-chance*) lead (* b rows))
+        bx (if (= side :left) (+ (left-x) *paddle-w*) (- (right-x cols) *bullet-w*))
+        vx (if (= side :left) *bullet-speed* (- 0 *bullet-speed*))
+        akey (if (= side :left) :l-ammo :r-ammo))
+    (assoc st
+      :bullets (cons {:x bx :y y :vx vx :side side} (get st :bullets))
+      akey (- (get st akey) 1)
+      :s s2)))
+
+(defn side-fire (st side)
+  "Tick `side`'s fire cooldown; when ready and it has ammo, shoot."
+  (let (fkey (if (= side :left) :l-fire :r-fire)
+        akey (if (= side :left) :l-ammo :r-ammo)
+        timer (- (get st fkey) 1))
+    (if (> timer 0)
+      (assoc st fkey timer)
+      (if (> (get st akey) 0)
+        (assoc (fire-bullet st side) fkey *fire-cooldown*)
+        (assoc st fkey *fire-cooldown*)))))
+
+(defn paddle-shot-box? (b bx bw by bh)
+  "Does bullet `b` hit the box at `(bx, by)` sized `bw`×`bh`? SWEPT along the
+bullet's last step (`:x` is post-move, `:vx` the step) so a fast bullet can't
+tunnel through a narrow target like the streaker."
+  (let (nx (get b :x)
+        ox (- nx (get b :vx))
+        lo (min ox nx)
+        hi (+ (max ox nx) *bullet-w*))
+    (and (< lo (+ bx bw))
+      (> hi bx)
+      (< (get b :y) (+ by bh))
+      (> (+ (get b :y) *bullet-h*) by))))
+
+(defn paddle-shot? (b px ph py)
+  "Does bullet `b` hit a paddle at face `px` (width `*paddle-w*`), top `py`, height `ph`?"
+  (paddle-shot-box? b px *paddle-w* py ph))
+
+(defn bullet-hits (st)
+  "Advance bullets; a bullet striking the enemy paddle DAMAGES it (crack → break),
+spent/off-court ones are dropped, and a hit fires a CRACK!/SHATTER! callout."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        lx (left-x)
+        rx (right-x cols)
+        lph (side-ph st :left rows)
+        rph (side-ph st :right rows)
+        sk (get st :streaker)
+        moved (map (fn (b) (assoc b :x (+ (get b :x) (get b :vx)))) (get st :bullets))
+        hit-l? (fn (b) (and (= (get b :side) :right) (paddle-shot? b lx lph (get st :lp))))
+        hit-r? (fn (b) (and (= (get b :side) :left) (paddle-shot? b rx rph (get st :rp))))
+        ;; a bullet can also gun down a streaker crossing the court
+        hit-sk? (fn (b)
+                  (and sk (paddle-shot-box? b (get sk :x) *streaker-w* (get sk :y) *streaker-h*)))
+        ndl (count (filter hit-l? moved))
+        ndr (count (filter hit-r? moved))
+        sk-shot (and sk (> (count (filter hit-sk? moved)) 0))
+        survivors (filter (fn (b)
+                            (and (>= (get b :x) (- 0 *bullet-w*))
+                              (<= (get b :x) cols)
+                              (not (hit-l? b))
+                              (not (hit-r? b))
+                              (not (hit-sk? b))))
+                    moved)
+        dmg-l (min 2 (+ (get st :l-dmg) ndl))
+        dmg-r (min 2 (+ (get st :r-dmg) ndr))
+        st1 (assoc st
+              :bullets survivors
+              :l-dmg dmg-l
+              :r-dmg dmg-r
+              :streaker (if sk-shot nil sk))
+        ;; a gunned-down streaker splats
+        st2 (if sk-shot
+              (announce (spawn-burst (assoc st1 :shake (max (get st1 :shake) *hit-shake*))
+                          (get sk :x)
+                          (get sk :y)
+                          *score-particles*
+                          *score-speed*
+                          0)
+                "SPLAT!"
+                0
+                *announce-life*)
+              st1))
+    (if (and (= ndl 0) (= ndr 0))
+      st2
+      (let (broke (or (and (> ndl 0) (= dmg-l 2)) (and (> ndr 0) (= dmg-r 2)))
+            hx (if (> ndl 0) lx rx)
+            hy (if (> ndl 0) (get st :lp) (get st :rp)))
+        (announce (spawn-burst (assoc st2
+                                 :shake (max (get st2 :shake) *hit-shake*)
+                                 :pop *pop-frames*)
+                    hx
+                    hy
+                    *hit-particles*
+                    *hit-speed*
+                    0)
+          (if broke "SHATTER!" "CRACK!")
+          0
+          *announce-life*)))))
+
+(defn step-bullets (st)
+  "Both sides shoot (on cooldown, if armed), then bullets fly + resolve hits."
+  (bullet-hits (side-fire (side-fire st :left) :right)))
+
+(defn step-frozen (st)
+  "A hit-stop frame: the world is HELD (ball, paddles, particles all paused) for
+dramatic weight — only the screen-shake rumbles on, the freeze timer ticks down,
+the crowd cheer ebbs, and the announcement keeps animating so the callout still
+reads during the pause."
+  (assoc st
+    :freeze (- (get st :freeze) 1)
+    :shake (* (get st :shake) *shake-decay*)
+    :cheer (max 0 (- (get st :cheer) 1))
+    :charge-glow (max 0 (- (get st :charge-glow) 1))
+    :announce-life (max 0 (- (get st :announce-life) 1))))
+
+(defn step (st)
+  "One tick of the world: advance the master hue, move the paddles, advance the
+ball, bounce it off the walls/paddles, COLLECT any powerup the ball touched,
+resolve a point, then age the trail, particles, flash, crowd cheer, active
+effects, and floating tokens. Pure — `run`'s loop just calls this each frame."
+  (if (> (get st :freeze) 0)
+    (step-frozen st)
+    (let (hue (mod (+ (get st :hue) *hue-step*) 360)
+          w (step-wind (assoc st :hue hue))
+          m (move-ai w)
+          ev (event-kind st)
+          ;; COURT-EVENT physics on the ball's velocity this frame
+          bcy (center (get m :by) *ball-h*)
+          gravity (if (= ev :gravity) *event-gravity* 0)
+          magnet (if (= ev :magnet) (* (if (< bcy (/ (get m :rows) 2)) 1 -1) *event-magnet*) 0)
+          [quake s2] (if (= ev :quake)
+                       (let ([qr s1] (rand-float (get m :s)))
+                         [(* (- (* 2 qr) 1) *event-quake*) s1])
+                       [0 (get m :s)])
+          ;; the wind + event tweaks nudge the ball's velocity, curving its flight
+          vx (clamp-vx (+ (get m :vx) (get w :wind-x)))
+          vy (clamp (+ (get m :vy) (get w :wind-y) gravity magnet quake) (- 0 *max-vy*) *max-vy*)
+          ;; SLOW-MO scales the per-frame travel; an EARTHQUAKE holds a shake
+          scale (if (= ev :slowmo) *slowmo-scale* 1)
+          b (assoc m
+              :vx vx
+              :vy vy
+              :bx (+ (get m :bx) (* vx scale))
+              :by (+ (get m :by) (* vy scale))
+              :shake (if (= ev :quake) (max (get m :shake) *event-quake-shake*) (get m :shake))
+              :s s2)
+          r (score (collect-powerups (bounce-paddles (bounce-walls b))))
+          trail (take *trail-len* (cons {:x (get r :bx) :y (get r :by) :hue hue} (get st :trail)))
+          aged (assoc r
+                 :trail trail
+                 :particles (step-particles (get r :particles))
+                 :flash (max 0 (- (get r :flash) 1))
+                 :pop (max 0 (- (get r :pop) 1))
+                 :shake (* (get r :shake) *shake-decay*)
+                 :cheer (max 0 (- (get r :cheer) 1))
+                 :charge-glow (max 0 (- (get r :charge-glow) 1))
+                 :announce-life (max 0 (- (get r :announce-life) 1))))
+      ;; advance the cosmetic + event subsystems (each takes + returns the world)
+      (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged))))))))))))
+
+;; ---- the initial world ----
+(defn init (cols rows s)
+  "A fresh game on a `cols`×`rows` court, served to a pseudo-random side from seed `s`."
+  (let (ph (paddle-h rows)
+        mid (- (/ rows 2) (/ ph 2)))
+    (serve
+      {:cols cols
+       :rows rows
+       :bx (/ cols 2)
+       :by (/ rows 2)
+       :vx 0
+       :vy 0
+       :lp mid
+       :rp mid
+       :ls 0
+       :rs 0
+       :t 0
+       :le 0
+       :re 0
+       :hue 0
+       :trail nil
+       :particles nil
+       :flash 0
+       :flash-hue 0
+       :pop 0
+       :shake 0
+       :freeze 0
+       :rally 0
+       :announce nil
+       :announce-life 0
+       :announce-max 1
+       :announce-hue 0
+       :owner nil
+       :in-crowd false
+       :l-frozen 0
+       :r-frozen 0
+       :l-ammo 0
+       :r-ammo 0
+       :l-dmg 0
+       :r-dmg 0
+       :bullets nil
+       :l-fire *fire-cooldown*
+       :r-fire *fire-cooldown*
+       :l-fx nil
+       :r-fx nil
+       :tokens nil
+       :pu-timer *powerup-every*
+       :cheer 0
+       :wind-x 0
+       :wind-y 0
+       :wind-tx 0
+       :wind-ty 0
+       :wind-timer *wind-period*
+       :wind-gust 0
+       :streaks (init-streaks cols rows)
+       :charge-glow 0
+       :ufo nil
+       ;; UFO first roll about a minute in (rare); streakers come far sooner + often
+       :ufo-timer (+ *event-check* (mod s *event-jitter*))
+       :abducted nil
+       :streaker nil
+       :streaker-timer (+ *streaker-min-gap* (mod s (- *streaker-max-gap* *streaker-min-gap*)))
+       :signs nil
+       :sign-timer 60
+       :show nil
+       :show-timer (+ *show-min-gap* (mod (+ s 313) (- *show-max-gap* *show-min-gap*)))
+       :event nil
+       :event-timer (+ *event-min-gap* (mod (+ s 911) (- *event-max-gap* *event-min-gap*)))
+       :s s}
+      (if (= 0 (mod s 2)) -1 1))))
+
+(defn refit (st cols rows)
+  "Re-fit the world to a resized `cols`×`rows` window, clamping the ball and
+paddles back into the new bounds (keeping the score and motion)."
+  (let (crows (court-rows rows)
+        lph (side-ph st :left crows)
+        rph (side-ph st :right crows))
+    (assoc st
+      :cols cols
+      :rows crows
+      :bx (clamp (get st :bx) 0 (- cols *ball-w*))
+      :by (clamp (get st :by) 0 (- crows *ball-h*))
+      :lp (clamp (get st :lp) 0 (- crows lph))
+      :rp (clamp (get st :rp) 0 (- crows rph)))))
+
+;; ---- rendering ----
+(defn bg-op (st cols rows)
+  "The court fill: the dark idle colour, or — while a point's `:flash` is alive —
+a bright wash in the scorer's hue that fades out over `*flash-frames*`."
+  (let (flash (get st :flash))
+    (if (= flash 0)
+      [:rect 0 0 cols rows *bg-face*]
+      (let (ff (/ flash *flash-frames*))
+        [:rect 0 0 cols rows {:bg (hsv->rgb (get st :flash-hue) 0.65 (* 0.55 ff))}]))))
+
+(defn net-ops (cols rows hue)
+  "The dashed centre net: a `*net-dash*`-tall, `*net-w*`-wide block every
+`*net-period*` rows — each dash a step further round the colour wheel, so the
+net is a vertical rainbow that scrolls as the master hue turns."
+  (let (col (- (floor (/ cols 2)) (floor (/ *net-w* 2))))
+    (map (fn (r) [:rect r col *net-w* *net-dash* {:bg (hsv->rgb (+ hue (* r 2)) 0.8 0.7)}])
+      (range 0 rows *net-period*))))
+
+(defn goal-ops (cols rows)
+  "The two GOALS — the mouths behind each paddle (`*paddle-margin*` deep): a faint
+net mesh filling each mouth, with bright posts framing it top and bottom."
+  (let (mesh {:bg [54 64 86]}
+        post {:bg [210 218 235]}
+        lx (left-x)
+        rx0 (+ (right-x cols) *paddle-w*)
+        rw (max 1 (- cols rx0))
+        left-net (concat (map (fn (x) [:rect 0 x 1 rows mesh]) (range 0 lx 3))
+                   (map (fn (y) [:rect y 0 lx 1 mesh]) (range 0 rows 4)))
+        right-net (concat (map (fn (x) [:rect 0 x 1 rows mesh]) (range rx0 cols 3))
+                    (map (fn (y) [:rect y rx0 rw 1 mesh]) (range 0 rows 4))))
+    (concat left-net
+      right-net
+      [[:rect 0 0 lx 1 post] [:rect (- rows 1) 0 lx 1 post]
+        [:rect 0 rx0 rw 1 post]
+        [:rect (- rows 1) rx0 rw 1 post]])))
+
+(defn trail-ops (trail)
+  "The ball's fading comet trail: each stored past position drawn ball-sized but
+dimmer and more saturated the older it is, oldest first so the ball paints over
+its own freshest trail."
+  (let (n (count trail))
+    (reverse (first (reduce (fn ([ops i] t)
+                              (let (f (- 1 (/ i (max 1 n)))
+                                    op [:rect (floor (get t :y))
+                                         (floor (get t :x))
+                                         *ball-w*
+                                         *ball-h*
+                                         {:bg (hsv->rgb (get t :hue) 0.85 (* 0.55 f f))}])
+                                [(cons op ops) (+ i 1)]))
+                      [nil 0]
+                      trail)))))
+
+(defn particle-ops (ps)
+  "Every live explosion particle as a small 2×1 block, its hue fixed at birth and
+its brightness fading with its remaining life."
+  (map (fn (p)
+         (let (f (/ (get p :life) (max 1 (get p :max))))
+           [:rect (floor (get p :y))
+             (floor (get p :x))
+             2
+             1
+             {:bg (hsv->rgb (get p :hue) 0.9 (max 0.2 f))}]))
+    ps))
+
+(defn wind-ops (st)
+  "The wind made visible: faint horizontal streaks drifting with the breeze, each
+as long as the wind is strong (so a stiff wind shows as longer, brighter dashes)."
+  (let (mag (+ (abs (get st :wind-x)) (abs (get st :wind-y)))
+        ; longer dashes in a stiffer wind
+        len (+ *streak-len* (round (* mag 60)))
+        val (min 0.5 (+ 0.12 (* mag 6))))
+    ; and a touch brighter
+    (map (fn (p) [:rect (floor (get p :y)) (floor (get p :x)) len 1 {:bg (hsv->rgb 210 0.2 val)}])
+      (get st :streaks))))
+
+(defn badge-ops (tx ty hue throb glyph)
+  "A glossy pickup badge at `(tx, ty)`: a soft pulsing GLOW behind, the saturated
+BODY, a bright SHEEN across its top, and the white `glyph` centred — the shared
+look for floating tokens and the HUD effect indicators."
+  (let (gs (max 1 (- *powerup-h* 2))
+        glow [:rect (- ty 1)
+               (- tx 1)
+               (+ *powerup-w* 2)
+               (+ *powerup-h* 2)
+               {:bg (hsv->rgb hue 0.7 (* 0.3 throb))}]
+        body [:rect ty tx *powerup-w* *powerup-h* {:bg (hsv->rgb hue 0.85 throb)}]
+        sheen [:rect ty tx *powerup-w* 1 {:bg (hsv->rgb hue 0.35 (min 1.0 (+ 0.35 throb)))}]
+        glyph-op [:text (+ ty (floor (/ (- *powerup-h* gs) 2)))
+                   (+ tx (floor (/ (- *powerup-w* gs) 2)))
+                   glyph
+                   {:scale gs :fg [255 255 255] :bold true}])
+    [glow body sheen glyph-op]))
+
+(defn token-ops (st)
+  "Each floating power-up as a glossy badge (green = good, red = bad) showing its
+glyph — `+`/`>` for GROW/SPEED, `-`/`~` for SHRINK/SLOW — with a throb pulse."
+  (let (throb (+ 0.62 (* 0.38 (/ (mod (get st :t) 22) 22.0))))
+    (mapcat (fn (tk)
+              (badge-ops (floor (get tk :x))
+                (floor (get tk :y))
+                (if (get tk :good?) *good-hue* *bad-hue*)
+                throb
+                (get tk :glyph)))
+      (get st :tokens))))
+
+(defn crowd-excitement (st)
+  "The crowd's hype, 0→1: climbs with the CURRENT rally length (the longer the
+point runs, the more worked-up they get) and is pegged high right after a point
+(the cheer). This drives how high the whole stand stands and how big the wave."
+  (max (min 1.0 (/ (get st :rally) *rally-hype*))
+    (/ (get st :cheer) (max 1 *cheer-frames*))))
+
+(defn wave-bump (cx crest)
+  "How raised seat-column `cx` is by the Mexican-wave crest at `crest` — a
+triangular bump in `[0,1]`, peaking at the crest and fading to 0 by `*wave-width*`
+cells away (0 outside it)."
+  (max 0 (- 1 (/ (abs (- cx crest)) *wave-width*))))
+
+(defn wave-count (rally)
+  "How many Mexican-wave crests sweep the stand at shot count `rally`: SINGLE at
+`*wave-threshold*`, DOUBLE at `*wave-double*`, TRIPLE at `*wave-triple*`."
+  (cond
+    (>= rally *wave-triple*) 3
+    (>= rally *wave-double*) 2
+    (>= rally *wave-threshold*) 1
+    :else 0))
+
+(defn wave-lift-at (cx crests)
+  "The strongest of the (possibly several) wave crests' bumps at column `cx`, so
+a double/triple wave shows as two/three humps travelling the stand at once."
+  (reduce (fn (m c) (max m (wave-bump cx c))) 0 crests))
+
+(defn seat-ops (cx feet hue bright arms?)
+  "Render ops for one spectator whose feet rest on row `feet`: a 2-tall torso in
+clothing `hue`, a head above it (lighter), and — when `arms?` — arms thrown up
+overhead. `bright` scales the colours with the crowd's excitement."
+  (let (w *crowd-person-w*
+        torso [:rect (- feet 2) cx w 2 {:bg (hsv->rgb hue 0.8 (* 0.8 bright))}]
+        head [:rect (- feet 3) cx w 1 {:bg (hsv->rgb hue 0.3 (min 1.0 (+ 0.25 bright)))}])
+    (if arms?
+      [torso head [:rect (- feet 4) cx w 1 {:bg (hsv->rgb hue 0.95 (min 1.0 (+ 0.3 bright)))}]]
+      [torso head])))
+
+(defn crowd-ops (st cols rows)
+  "The grandstand in the bottom band (`rows`..`rows+*crowd-rows*`): tiers of little
+spectators, each lifted by the travelling Mexican-wave crest plus a steady rise
+that grows with the crowd's excitement, erupting (leaping, arms up, rainbow) on a
+point. Per-seat phase/hue come from the column so the motion and colours vary
+across the stand — it reads as a packed, lively crowd, not a bar."
+  (let (exc (crowd-excitement st)
+        cheer (get st :cheer)
+        t (get st :t)
+        ;; the Mexican wave: 0/1/2/3 crests by shot count. The crests travel
+        ;; together, evenly spaced around the stand (so a triple wave shows three
+        ;; humps sweeping at once).
+        nwaves (wave-count (get st :rally))
+        span (+ cols (* 2 *wave-width*))
+        crests (if (= nwaves 0)
+                 nil
+                 (map (fn (i) (wrapf (+ (* t *wave-speed*) (* i (/ span nwaves))) span))
+                   (range nwaves)))
+        ;; QUIET by default: a seat only bobs once there's some excitement, and the
+        ;; busier it gets (more shots) the FASTER the bob. The whole stand also
+        ;; rises a little (`base-lift`) as shots tally.
+        bob-period (max 2 (round (- 18 (* 15 exc))))
+        base-lift (round (* exc *excited-lift*))
+        ; empty seats (beamed up)
+        abducted (map (fn (a) (get a :col)) (get st :abducted))
+        ; keep figures (incl. arms) inside the band
+        lift-cap (- *crowd-rows* *crowd-tier-rise* 4)
+        band-bottom (+ rows *crowd-rows*))
+    (mapcat
+      (fn (tier)
+        (let (
+              ; back tiers sit higher
+              rise (* tier *crowd-tier-rise*)
+              stagger (* tier (quot *crowd-spacing* 2))
+              dim (- 1 (* tier 0.3)))
+          (mapcat
+            (fn (cx)
+              (if (and (= tier 0) (includes? abducted cx))
+                ; this spectator has been beamed up — leave a gap
+                nil
+                (let (bump (if (= nwaves 0) 0 (wave-lift-at cx crests))
+                      ;; quiet at rest: bob only kicks in with excitement, faster as it
+                      ;; climbs. Each seat gets a SCRAMBLED phase + period from its column
+                      ;; (a hash, not a linear `cx`), so the idle bobbing looks random
+                      ;; rather than a wave scrolling across the stand.
+                      h (mod (* (+ cx 7) 2654435761) 1009)
+                      period (+ bob-period (mod h 5))
+                      bob (if (and (> exc 0.06) (>= (mod (+ h t) period) (quot period 2)))
+                            1
+                            0)
+                      cheer-leap (round (* (/ cheer (max 1 *cheer-frames*)) *cheer-jump*))
+                      lift (min lift-cap
+                             (+ base-lift
+                               bob
+                               cheer-leap
+                               (round (* bump *wave-lift* (+ 0.5 (* 0.5 exc))))))
+                      feet (- band-bottom rise lift)
+                      hue (if (> cheer 0) (mod (+ (* cx 23) (* t 5)) 360) (mod (* cx 47) 360))
+                      bright (* dim (+ 0.4 (* 0.6 (max exc bump))))
+                      arms? (or (> cheer 0) (> bump 0.55)))
+                  (seat-ops cx feet hue bright arms?))))
+            (range stagger cols *crowd-spacing*))))
+      (range 0 *crowd-tiers*))))
+
+(defn ufo-ops (st rows)
+  "The visiting UFO (if any): a saucer with a domed top and blinking lights, and —
+while its beam reaches its target — a faint green tractor beam down into the stand."
+  (let (ufo (get st :ufo))
+    (if (nil? ufo)
+      nil
+      (let (x (floor (get ufo :x))
+            uy (- rows 5)
+            blink (if (= 0 (mod (quot (get st :t) 6) 2)) [255 90 90] [90 170 255])
+            beam? (< (abs (- (+ (get ufo :x) (quot *ufo-w* 2)) (get ufo :target))) *beam-window*)
+            dome [:rect (- uy 1) (+ x 3) (max 1 (- *ufo-w* 6)) 1 {:bg [190 235 255]}]
+            body [:rect uy x *ufo-w* 2 {:bg [150 160 190]}]
+            light-l [:rect (+ uy 1) (+ x 1) 1 1 {:bg blink}]
+            light-r [:rect (+ uy 1) (+ x (- *ufo-w* 2)) 1 1 {:bg blink}]
+            beam (if beam?
+                   [[:rect (+ uy 2)
+                      (- (get ufo :target) 1)
+                      3
+                      (- (+ rows *crowd-rows*) (+ uy 2))
+                      {:bg (hsv->rgb 130 0.85 0.32)}]]
+                   nil))
+        (concat [dome body light-l light-r] beam)))))
+
+(defn crowd-show-ops (st cols rows)
+  "The active cosmetic crowd show (if any), drawn over/around the stand: phone
+LIGHTS twinkling, a sweeping SPOTLIGHT, a flock of BIRDS, falling CONFETTI, or a
+bouncing BEACHBALL. Purely visual."
+  (let (show (get st :show))
+    (if (nil? show)
+      nil
+      (let (t (get st :t)
+            kind (get show :kind))
+        (cond
+          (= kind :lights) (map
+                             (fn (col)
+                               ;; a SOFT twinkle: each light gently pulses (smooth
+                               ;; `tri`, per-column phase) — not a hard on/off strobe
+                               (let (b (+ 0.22 (* 0.55 (tri (/ (+ t (mod (* col 53) 30)) 26.0)))))
+                                 [:rect (+ rows 1) col 1 1 {:bg (hsv->rgb 48 0.16 b)}]))
+                             (range 0 cols 3))
+          (= kind :birds) (mapcat (fn (i)
+                                    (let (x (floor (- (wrapf (+ (* t 1.3) (* i 17)) (+ cols 30)) 15))
+                                          y (+ (- rows 6) (mod (+ i (quot t 10)) 2)))
+                                      [[:rect y x 1 1 {:bg [40 40 55]}] [:rect (- y 1)
+                                                                          (+ x 1)
+                                                                          1
+                                                                          1
+                                                                          {:bg [40 40 55]}]
+                                        [:rect y (+ x 2) 1 1 {:bg [40 40 55]}]]))
+                            (range *bird-count*))
+          (= kind :confetti) (map (fn (i)
+                                    (let (x (mod (* i 89) cols)
+                                          y (+ rows (mod (+ (* i 41) t) *crowd-rows*)))
+                                      [:rect y x 1 1 {:bg (hsv->rgb (mod (* i 47) 360) 0.9 0.95)}]))
+                               (range *confetti-count*))
+          (= kind :beachball) (let (bx (floor (* (- cols 4) (tri (/ t 90.0))))
+                                    by (+ rows 1 (floor (* (- *crowd-rows* 4) (tri (/ t 23.0))))))
+                                [[:rect by bx 4 2 {:bg (hsv->rgb (mod (quot t 4) 360) 0.85 1.0)}]])
+          :else nil)))))
+
+(defn sign-ops (st)
+  "The held-up crowd placards: a coloured board with text, on a handle that
+reaches DOWN into the crowd (so it's clearly held, not floating), bobbing gently
+and fading over its final frames."
+  (let (t (get st :t)
+        crowd-bottom (+ (get st :rows) *crowd-rows* -2))
+    ; where the holder's hands are
+    (mapcat
+      (fn (sg)
+        (let (text (get sg :text)
+              sc *sign-scale*
+              w (+ (* (string-length text) sc) 2)
+              h (+ sc 2)
+              ; gentle wave of the board
+              bob (mod (+ (get sg :x) (quot t 8)) 2)
+              x (get sg :x)
+              y (- (get sg :y) bob)
+              ; fade out over the last 30 frames
+              f (min 1.0 (/ (get sg :life) 30.0))
+              ;; the handle runs from the board's bottom down to the crowd's hands
+              stick-h (max 1 (- crowd-bottom (+ y h)))
+              stick [:rect (+ y h) (+ x (quot w 2)) 1 stick-h {:bg [120 92 64]}]
+              board [:rect y x w h {:bg (hsv->rgb (get sg :hue) 0.5 (* 0.95 f))}]
+              label [:text (+ y 1) (+ x 1) text {:scale sc :fg [20 20 28] :bold true}])
+          [stick board label]))
+      (get st :signs))))
+
+(defn score-ops (st hue)
+  "The two scores, scaled up and glowing in the master hue: left player's at the
+left quarter, right's at the right quarter, near the top."
+  (let (cols (get st :cols)
+        l-face (assoc *score-face* :scale *score-scale* :fg (hsv->rgb (+ hue *left-hue*) 0.55 1.0))
+        r-face (assoc *score-face* :scale *score-scale* :fg (hsv->rgb (+ hue *right-hue*) 0.55 1.0))
+        row 1
+        left-op [:text row (floor (/ cols 4)) (str (get st :ls)) l-face]
+        right-op [:text row (floor (* cols 0.72)) (str (get st :rs)) r-face])
+    [left-op right-op]))
+
+(defn fx-badge-ops (x row eff)
+  "One active-effect HUD badge at `(x, row)`: a coloured tile (green good / red
+bad) with the effect glyph, and a duration bar beneath that DEPLETES as the
+effect's `:life` runs down — so you can see what's active and for how much longer."
+  (let (hue (if (get eff :good?) *good-hue* *bad-hue*)
+        frac (/ (get eff :life) *fx-life*)
+        gs (max 1 (- *fx-badge-h* 2))
+        body [:rect row x *fx-badge-w* *fx-badge-h* {:bg (hsv->rgb hue 0.8 0.85)}]
+        glyph [:text (+ row (floor (/ (- *fx-badge-h* gs) 2)))
+                (+ x (floor (/ (- *fx-badge-w* gs) 2)))
+                (get eff :glyph)
+                {:scale gs :fg [255 255 255] :bold true}]
+        track [:rect (+ row *fx-badge-h*) x *fx-badge-w* 1 {:bg [42 46 58]}]
+        barw (round (* *fx-badge-w* frac))
+        bar (if (> barw 0) [:rect (+ row *fx-badge-h*) x barw 1 {:bg (hsv->rgb hue 0.6 1.0)}] nil))
+    (filter (fn (o) (not (nil? o))) [body glyph track bar])))
+
+(defn side-fx-ops (effs x0)
+  "Stack a side's active-effect badges down from the top edge at column `x0`."
+  (first (reduce (fn ([ops row] eff)
+                   [(concat ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)])
+           [nil *fx-badge-top*]
+           effs)))
+
+(defn effect-indicator-ops (st cols)
+  "Active-effect badges in the top corners — left side's effects top-left, right
+side's top-right — each counting its remaining time down."
+  (concat (side-fx-ops (get st :l-fx) 1)
+    (side-fx-ops (get st :r-fx) (- cols *fx-badge-w* 1))))
+
+(defn bullet-ops (st)
+  "Every bullet in flight as a small bright tracer."
+  (map (fn (b)
+         [:rect (floor (get b :y)) (floor (get b :x)) *bullet-w* *bullet-h* {:bg [255 232 90]}])
+    (get st :bullets)))
+
+(defn ammo-ops (st cols)
+  "Each side's BULLET COUNT along the top: a bullet icon and the number (bright
+yellow when armed, dim when empty), plus a row of pips, run inward from the goal."
+  (let (badge (fn (n x pip-dir)
+                (let (col (if (> n 0) [255 232 110] [96 96 116]))
+                  (concat [[:rect 1 x 3 2 {:bg col}] [:text 1
+                                                       (+ x 4)
+                                                       (str n)
+                                                       {:scale 4 :fg col :bold true}]]
+                    ;; pips trailing inward, one per shot (capped so they don't run on)
+                    (map (fn (i) [:rect 4 (+ x (* pip-dir (* (+ i 1) 3))) 2 1 {:bg col}])
+                      (range (min n 12)))))))
+    (concat (badge (get st :l-ammo) (left-x) 1)
+      (badge (get st :r-ammo) (- (right-x cols) 8) -1))))
+
+(defn paddle-render-ops (top px ph face dmg)
+  "A paddle's draw ops given its damage: whole when intact, split by a dark CRACK
+when cracked (`dmg` 1), and GONE when broken (`dmg` 2)."
+  (cond
+    (>= dmg 2) nil
+    (= dmg 1) (let (half (quot ph 2))
+                [[:rect top px *paddle-w* (max 1 (- half 1)) face] [:rect (+ top half 1)
+                                                                     px
+                                                                     *paddle-w*
+                                                                     (max 1 (- ph half 1))
+                                                                     face]])
+    :else [[:rect top px *paddle-w* ph face]]))
+
+(defn announce-ops (st cols rows)
+  "The announcer callout: big bold centred text that PUNCHES in (a touch larger
+when fresh) and fades out over its life, tinted by its hue. Nothing while no
+callout is live."
+  (let (text (get st :announce)
+        life (get st :announce-life))
+    (if (or (nil? text) (= life 0))
+      nil
+      (let (f (/ life (max 1 (get st :announce-max)))
+            scale (max 1 (min 16 (round (* *announce-scale* (+ 0.85 (* 0.35 f))))))
+            val (min 1.0 (* 1.3 f))
+            len (string-length text)
+            col (max 0 (- (floor (/ cols 2)) (floor (/ (* len scale) 2))))
+            row (max 0 (- (floor (/ rows 3)) (floor (/ scale 2))))
+            face {:bold true :scale scale :fg (hsv->rgb (get st :announce-hue) 0.3 val)})
+        [[:text row col text face]]))))
+
+(defn shift-op (op dr dc)
+  "Shift a `[:rect|:text row col …]` op by `(dr, dc)` cells (row at index 1, col at
+index 2) — the screen-shake transform; any other op passes through unchanged."
+  (if (and (vector? op) (or (= (first op) :rect) (= (first op) :text)))
+    (assoc (assoc op 1 (+ (vector-ref op 1) dr)) 2 (+ (vector-ref op 2) dc))
+    op))
+
+(defn shake-offset (st)
+  "The whole-frame shake offset `[dr dc]` in cells for this frame: a deterministic
+jitter in `[-mag, mag]` (driven by the frame counter `:t`, two different strides
+so the axes don't move in lockstep), where `mag = floor(:shake)`. `[0 0]` at rest."
+  (let (mag (floor (get st :shake))
+        t (get st :t)
+        span (+ (* 2 mag) 1))
+    (if (= mag 0)
+      [0 0]
+      [(- (mod (* t 7) span) mag) (- (mod (* t 13) span) mag)])))
+
+(defn ball-op (st hue)
+  "The ball op: normally a glowing disc in the master hue, but during an impact
+`:pop` it flares WHITE and grows up to `*pop-grow*` cells on every side, shrinking
+back as the pop ages."
+  (let (pop (get st :pop)
+        grow (if (= pop 0) 0 (round (* (/ pop *pop-frames*) *pop-grow*)))
+        face (if (= pop 0) {:bg (hsv->rgb hue 0.55 1.0)} {:bg [255 255 255]}))
+    [:rect (- (floor (get st :by)) grow)
+      (- (floor (get st :bx)) grow)
+      (+ *ball-w* (* 2 grow))
+      (+ *ball-h* (* 2 grow))
+      face]))
+
+(defn streaker-ops (st)
+  "The streaker on the court (if any): a little running figure — head, bare body
+with a modesty bar, and legs that pump as they stride."
+  (let (sk (get st :streaker))
+    (if (nil? sk)
+      nil
+      (let (x (floor (get sk :x))
+            y (floor (get sk :y))
+            skin [236 196 160]
+            stride (if (= 0 (mod (quot (get st :t) 4) 2)) 0 1)
+            head [:rect y (+ x 1) 1 1 {:bg skin}]
+            body [:rect (+ y 1) x *streaker-w* 2 {:bg skin}]
+            censor [:rect (+ y 2) x *streaker-w* 1 {:bg [20 20 20]}]
+            leg-l [:rect (+ y 3) (+ x stride) 1 2 {:bg skin}]
+            leg-r [:rect (+ y 3) (+ x (- *streaker-w* 1) (- 0 stride)) 1 2 {:bg skin}])
+        [head body censor leg-l leg-r]))))
+
+(defn charge-aura-ops (st)
+  "The CHARGED-shot graphic: a bright energy ring that expands and fades out from
+the ball over `*charge-glow-frames*` — the visible kick of a perfectly-timed hit."
+  (let (g (get st :charge-glow))
+    (if (= g 0)
+      nil
+      (let (f (/ g *charge-glow-frames*)
+            bx (floor (get st :bx))
+            by (floor (get st :by))
+            ; expands as the glow fades
+            ring (+ 1 (round (* (- 1 f) 5)))
+            ; bright gold
+            col (hsv->rgb 52 0.85 (min 1.0 (+ 0.3 f)))
+            w (+ *ball-w* (* 2 ring))
+            h (+ *ball-h* (* 2 ring))
+            top (- by ring)
+            left (- bx ring))
+        ;; four bars forming a hollow ring around the ball
+        [[:rect top left w 1 {:bg col}] [:rect (+ top h -1) left w 1 {:bg col}]
+          [:rect top left 1 h {:bg col}]
+          [:rect top (+ left w -1) 1 h {:bg col}]]))))
+
+(defn render (st)
+  "The full frame as a render-op vector, composed back-to-front so later ops
+paint on top: the (maybe flashing) court fill and the bottom CROWD (a fixed
+backdrop), then the on-court layer — net, scores, comet trail, explosion
+particles, power-up tokens, the streaker, the paddles, the charged-shot aura and
+ball, and the announcer — all shifted by the current screen-shake offset."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        hue (get st :hue)
+        lph (side-ph st :left rows)
+        rph (side-ph st :right rows)
+        l-face {:bg (paddle-color st :left *left-color*)}
+        r-face {:bg (paddle-color st :right *right-color*)}
+        left-ops (paddle-render-ops (floor (get st :lp)) (left-x) lph l-face (get st :l-dmg))
+        right-ops (paddle-render-ops (floor (get st :rp)) (right-x cols) rph r-face (get st :r-dmg))
+        [dr dc] (shake-offset st)
+        front (concat (wind-ops st)
+                (goal-ops cols rows)
+                (net-ops cols rows hue)
+                (score-ops st hue)
+                (effect-indicator-ops st cols)
+                (ammo-ops st cols)
+                (trail-ops (get st :trail))
+                (particle-ops (get st :particles))
+                (token-ops st)
+                (streaker-ops st)
+                left-ops
+                right-ops
+                (bullet-ops st)
+                (charge-aura-ops st)
+                [(ball-op st hue)]
+                (announce-ops st cols rows)))
+    (into [[:clear] (bg-op st cols rows)]
+      (concat (crowd-ops st cols rows)
+        (crowd-show-ops st cols rows)
+        (sign-ops st)
+        (ufo-ops st rows)
+        (if (and (= dr 0) (= dc 0)) front (map (fn (op) (shift-op op dr dc)) front))))))
+
+;; ---- the loop (the window owner; self-paced) ----
+(defn quit? (m)
+  "Is message `m` a request to quit — the window's close box, or q / Esc / Ctrl-C?"
+  (or (= m :close) (= m "q") (= m :escape) (= m :ctrl-c)))
+
+(defn wait-ms (deadline)
+  "Whole milliseconds from now until `deadline` (ns), floored at 0 — the
+`(after)` delay that keeps the loop on a fixed cadence regardless of how long a
+frame's work took (so motion doesn't speed up / drift when a frame is cheap)."
+  (max 0 (quot (- deadline (now-ns)) 1000000)))
+
+(defn next-deadline (deadline)
+  "The next frame's deadline (ns): one `*frame-ms*` on, but snapped forward to
+`now` if we've already fallen a whole frame behind, so the loop can't spiral."
+  (let (frame-ns (* *frame-ms* 1000000)
+        d (+ deadline frame-ns))
+    (if (< d (now-ns)) (+ (now-ns) frame-ns) d)))
+
+(defn loop (w st deadline)
+  "Draw the world, then park in `(receive)` until the frame `deadline`: a
+`[:resize]` refits and redraws, a quit message tears down, anything else (there
+is no gameplay input) is ignored and keeps the cadence, and the `(after)`
+timeout advances one physics tick. Pacing against an absolute deadline (rather
+than a fixed sleep after variable work) keeps the frame interval even — the
+thing that actually makes the motion read as smooth."
+  (do
+    (gui-draw w (render st))
+    (receive
+      ([:resize cols rows] (loop w (refit st cols rows) deadline))
+      (m (if (quit? m) (gui-close w) (loop w st deadline)))
+      (after (wait-ms deadline) (loop w (step st) (next-deadline deadline))))))
+
+(defn run ()
+  "Open a maximised window and run an AI-vs-AI Pong game in it until quit. The
+court is the whole window (sized from `gui-size` in cells, with a small cell
+font for smooth motion); the PRNG is seeded from the wall clock so each launch
+serves differently."
+  (let (w (gui-open "Brood Pong" 1280 800)
+        _ (gui-font! w {:family :mono :height *cell-px*})
+        _ (gui-maximize! w true)
+        [cols rows] (gui-size w))
+    (loop w (init cols (court-rows rows) (now-ns)) (+ (now-ns) (* *frame-ms* 1000000)))))
+
+(defn main ()
+  "Entry point (`nest run`) — start an AI-vs-AI Pong match."
+  (run))

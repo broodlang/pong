@@ -1,4 +1,5 @@
-(defmodule hello "A second module in the pong project — `main` does
+(defmodule hello
+  "A second module in the pong project — `main` does
 `(:use hello)` to call `greeting`. Showcases the module/namespace system
 (ADR-065): `hello` defines `greeting` as `hello/greeting`; `(:use hello)`
 imports it so `main` can call it bare.")

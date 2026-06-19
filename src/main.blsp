@@ -1,8 +1,9 @@
-(defmodule main "The pong project's entry-point module — wired up as
+; the async, safe logger (std/log)
+(defmodule main
+  "The pong project's entry-point module — wired up as
 the `nest run` entry by default (module `main`, fn `main`)."
   (:use hello)
-  (:use log))  ; the async, safe logger (std/log)
-
+  (:use log))
 (defn main ()
   "Entry point: start the logger and print the project's greeting."
   ;; `start-logger` spawns a logging process (async — each `log-*` call is

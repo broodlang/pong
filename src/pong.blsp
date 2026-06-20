@@ -176,15 +176,17 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ; base glyph scale of a callout (punches a little bigger)
 (def *announce-scale* 10)
 ;; ---- VICTORY FINALE -------------------------------------------------------
-;; On a match win the board, the LOSING paddle and the whole CROWD erupt: a
+;; On a match win the board, the LOSING paddle and the CROWD erupt: a gentle
 ;; rolling barrage of explosions (`win-explode`) detonates across the court and
 ;; the stand for `*win-blast-frames*` frames — a fresh pair (one on court, one in
 ;; the crowd, tearing a seat out) every `*win-blast-every*` frames — while the
-;; winner's banner holds. `win-loop` owns this phase; any key drops to the menu.
+;; winner's banner and a golden CUP hold. `win-loop` owns this; any key → menu.
 ; frames the victory barrage keeps detonating
-(def *win-blast-frames* 150)
-; a fresh detonation every N frames
-(def *win-blast-every* 3)
+(def *win-blast-frames* 84)
+; a fresh detonation every N frames (sparse ⇒ understated)
+(def *win-blast-every* 7)
+; particles per detonation (modest ⇒ a celebration, not a fireworks finale)
+(def *win-blast-particles* 44)
 ; glyph scale of the WINNER banner
 (def *win-banner-scale* 13)
 ;; ---- POWER-UPS ------------------------------------------------------------
@@ -2600,9 +2602,9 @@ overlay's colour cycle (the world never steps while paused)."
 
 ;; ---- the victory finale (a match win) ----
 (defn win-explode (st)
-  "One detonation of the victory barrage: a big burst at a random point on the
-COURT plus one in the STAND that tears a spectator out of their seat — re-kicking
-the flash + shake. Threads the PRNG."
+  "One understated detonation of the victory barrage: a modest burst at a random
+point on the COURT plus one in the STAND that tears a spectator out of their seat,
+with a gentle shake (no full-court flash). Threads the PRNG."
   (let (cols (get st :cols)
         rows (get st :rows)
         [a s1] (rand-float (get st :s))
@@ -2617,27 +2619,65 @@ the flash + shake. Threads the PRNG."
         ccy (+ rows (quot *crowd-rows* 2))
         kicked (assoc st
                  :s s4
-                 :shake (max (get st :shake) *score-shake*)
-                 :flash *flash-frames*
-                 :flash-hue hue1
+                 :shake (max (get st :shake) *hit-shake*)
                  :abducted (cons {:col ccol :life *abduct-respawn*} (get st :abducted)))
-        court-blast (spawn-burst kicked (* a cols) (* b rows) *score-particles* *score-speed* hue1))
-    (spawn-burst court-blast ccol ccy *score-particles* *score-speed* hue2)))
+        court-blast (spawn-burst kicked
+                      (* a cols)
+                      (* b rows)
+                      *win-blast-particles*
+                      *hit-speed*
+                      hue1))
+    (spawn-burst court-blast ccol ccy *win-blast-particles* *hit-speed* hue2)))
 
 (defn win-options ()
   "The win-screen actions: `[label action]` — play again, or back to setup."
   [["RETRY" :retry] ["MAIN MENU" :menu]])
 
+(defn trophy-ops (cx cy u)
+  "A golden winner's CUP centred at `(cx, cy)`, built from rects scaled by the cell
+unit `u`: a wide bowl tapering to a stem and base, two side handles, a soft sheen
+and a `1` on the cup."
+  (let (gold (hsv->rgb 45 0.7 0.95)
+        gold-dk (hsv->rgb 42 0.78 0.62)
+        sheen (hsv->rgb 48 0.2 1.0)
+        ;; centred horizontal bar: `w`/`h` in units, row `y` in cells
+        bar (fn (y w h face) [:rect y (- cx (quot (* w u) 2)) (* w u) (* h u) face])
+        top (- cy (* 6 u)))
+    [[:rect (+ top u) (- cx (* 6 u)) u (* 3 u) gold-dk] [:rect (+ top u)
+                                                          (- cx (* 6 u))
+                                                          (* 2 u)
+                                                          u
+                                                          gold-dk]
+      [:rect (+ top (* 3 u)) (- cx (* 6 u)) (* 2 u) u gold-dk]
+      [:rect (+ top u) (+ cx (* 5 u)) u (* 3 u) gold-dk]
+      [:rect (+ top u) (+ cx (* 4 u)) (* 2 u) u gold-dk]
+      [:rect (+ top (* 3 u)) (+ cx (* 4 u)) (* 2 u) u gold-dk]
+      ;; bowl: wide rim tapering down to the stem
+      (bar top 9 1 sheen)
+      (bar (+ top u) 9 2 gold)
+      (bar (+ top (* 3 u)) 7 1 gold)
+      (bar (+ top (* 4 u)) 5 1 gold)
+      (bar (+ top (* 5 u)) 3 1 gold-dk)
+      ;; stem + two-tier base
+      (bar (+ top (* 6 u)) 1 2 gold-dk)
+      (bar (+ top (* 8 u)) 3 1 gold)
+      (bar (+ top (* 9 u)) 5 1 gold-dk)
+      ;; a champion's "1" on the cup face
+      [:text (+ top u) (- cx (quot u 2)) "1" {:scale (max 1 u) :fg gold-dk :bold true}]]))
+
 (defn win-overlay (st sel)
-  "The winner banner + RETRY / MAIN MENU choices over the finale: the winning side's
-name huge in its colour, the final score, and the two actions (the highlighted one
-barred + brighter)."
+  "The winner banner + RETRY / MAIN MENU choices over the finale, with a golden CUP
+on the right: the winning side's name huge in its colour, the final score, and the
+two actions (the highlighted one barred + brighter)."
   (let (cols (get st :cols)
         rows (get st :rows)
         winner (get st :winner)
         hue (get st :hue)
         name (if (= winner :left) "LEFT WINS" "RIGHT WINS")
         wcol (hsv->rgb (+ hue (if (= winner :left) *left-hue* *right-hue*)) 0.6 1.0)
+        trophy (trophy-ops (round (* cols 0.82))
+                 (round (* rows 0.42))
+                 (max 2 (round (* rows 0.03))))
         opts (win-options)
         ostart (round (* rows 0.66))
         oslot (round (* rows 0.11))
@@ -2661,24 +2701,25 @@ barred + brighter)."
                                          nil))
                                (concat bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts))))
-    (concat [(menu-text-op cols
-               (round (* rows 0.28))
-               name
-               (min 16 (max 2 (round (* rows 0.12))))
-               wcol) (menu-text-op cols
-                                                                                                                                                                      (round (* rows
-                                                                                                                                                                               0.48))
-                                                                                                                                                                      (str (get st
-                                                                                                                                                                             :ls)
-                                                                                                                                                                        " - "
-                                                                                                                                                                        (get st
-                                                                                                                                                                          :rs))
-                                                                                                                                                                      (min 12
-                                                                                                                                                                        (max 2
-                                                                                                                                                                          (round (* rows
-                                                                                                                                                                                   0.055))))
-                                                                                                                                                                      [240 240
-                                                                                                                                                                        255])]
+    (concat trophy
+      [(menu-text-op cols
+         (round (* rows 0.28))
+         name
+         (min 16 (max 2 (round (* rows 0.12))))
+         wcol) (menu-text-op cols
+                                                                                                                                        (round (* rows
+                                                                                                                                                 0.48))
+                                                                                                                                        (str (get st
+                                                                                                                                               :ls)
+                                                                                                                                          " - "
+                                                                                                                                          (get st
+                                                                                                                                            :rs))
+                                                                                                                                        (min 12
+                                                                                                                                          (max 2
+                                                                                                                                            (round (* rows
+                                                                                                                                                     0.055))))
+                                                                                                                                        [240 240
+                                                                                                                                          255])]
       option-ops)))
 
 (defn win-render (st sel)

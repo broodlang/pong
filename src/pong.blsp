@@ -175,6 +175,18 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *win-announce-life* 95)
 ; base glyph scale of a callout (punches a little bigger)
 (def *announce-scale* 10)
+;; ---- VICTORY FINALE -------------------------------------------------------
+;; On a match win the board, the LOSING paddle and the whole CROWD erupt: a
+;; rolling barrage of explosions (`win-explode`) detonates across the court and
+;; the stand for `*win-blast-frames*` frames — a fresh pair (one on court, one in
+;; the crowd, tearing a seat out) every `*win-blast-every*` frames — while the
+;; winner's banner holds. `win-loop` owns this phase; any key drops to the menu.
+; frames the victory barrage keeps detonating
+(def *win-blast-frames* 150)
+; a fresh detonation every N frames
+(def *win-blast-every* 3)
+; glyph scale of the WINNER banner
+(def *win-banner-scale* 13)
 ;; ---- POWER-UPS ------------------------------------------------------------
 ;; Tokens drift onto the court; when the BALL touches one it's awarded to the
 ;; ball's current OWNER — the paddle that last hit it — applying a timed effect
@@ -1028,11 +1040,13 @@ and `score` turns it into a point."
       :else st)))
 
 (defn point (st scorer x dir)
-  "Award a point to `scorer` (`:left`/`:right`), exiting at `x` and re-serving
-toward `dir`. Resets the rally, kicks the hue to a fresh palette, flashes the
-court, throws the biggest shake + freeze + explosion, and announces the moment.
-Reaching the match's `:win-score` (the menu's points-to-win) declares the winner
-(a giant, lingering callout + an even bigger blast) and resets for a fresh match."
+  "Award a point to `scorer` (`:left`/`:right`), exiting at `x`. Resets the rally,
+kicks the hue to a fresh palette, flashes the court, throws a big shake + explosion
+and announces the moment. An ordinary point repairs both paddles and re-serves
+toward `dir`. Reaching the match's `:win-score` (the menu's points-to-win) instead
+DECLARES the winner: it sets `:winner`, leaves the final score standing, BLOWS THE
+LOSER'S PADDLE APART (`dmg` 2), and freezes — `loop` then hands off to `win-loop`,
+which detonates the board + crowd finale."
   (let (ls (if (= scorer :left) (+ (get st :ls) 1) (get st :ls))
         rs (if (= scorer :right) (+ (get st :rs) 1) (get st :rs))
         win? (>= (if (= scorer :left) ls rs) (get st :win-score))
@@ -1040,22 +1054,27 @@ Reaching the match's `:win-score` (the menu's points-to-win) declares the winner
         text (if win? (str (if (= scorer :left) "LEFT" "RIGHT") " WINS!") "POINT!")
         ; the crowd goes wild
         boom (assoc st
-               :ls (if win? 0 ls)
-               :rs (if win? 0 rs)
+               :ls ls
+               :rs rs
                :rally 0
                :hue hue
                :flash *flash-frames*
                :flash-hue hue
                :shake (max (get st :shake) (if win? (* *score-shake* 1.7) *score-shake*))
                :pop *pop-frames*
-               :freeze (if win? *win-freeze* *score-freeze*)
-               :l-dmg 0
-               ; paddles are repaired each point ("you get it back when you lose")
-               :r-dmg 0
+               :freeze (if win? 0 *score-freeze*)
+               :winner (if win? scorer nil)
+               ;; on a WIN the loser's paddle is shattered; on an ordinary point both
+               ;; are repaired ("you get it back when you lose")
+               :l-dmg (if (and win? (= scorer :right)) 2 0)
+               :r-dmg (if (and win? (= scorer :left)) 2 0)
                :cheer (if win? (* *cheer-frames* 2) *cheer-frames*))
         announced (announce boom text hue (if win? *win-announce-life* *announce-life*))
-        n (if win? (* *score-particles* 2) *score-particles*))
-    (serve (spawn-burst announced x (center (get st :by) *ball-h*) n *score-speed* hue) dir)))
+        n (if win? (* *score-particles* 2) *score-particles*)
+        blasted (spawn-burst announced x (center (get st :by) *ball-h*) n *score-speed* hue))
+    ;; re-centre the ball either way: an ordinary point plays straight on, a win
+    ;; parks it at centre (frozen — `win-loop` runs the finale and never steps)
+    (serve blasted dir)))
 
 (defn score (st)
   "Award a point to whichever player the ball got past (and celebrate), else leave
@@ -1800,6 +1819,9 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :ball-mult (get game :ball-mult)
        :powerup-mult (get game :powerup-mult)
        :win-score (get config :points)
+       :winner nil
+       ;; keep the menu choices so the win screen's RETRY can replay this exact match
+       :config config
        :hue 0
        :trail nil
        :particles nil
@@ -2465,7 +2487,11 @@ an absolute deadline keeps the frame interval even — what makes motion read sm
            (or (= m :close) (= m :ctrl-c)) (gui-close w)
            (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
            :else (loop w (press-key st m) deadline)))
-      (after (wait-ms deadline) (loop w (step st) (next-deadline deadline))))))
+      (after (wait-ms deadline)
+        (let (st2 (step st))
+          (if (get st2 :winner)
+            (win-loop w st2 0 0 (next-deadline deadline))
+            (loop w st2 (next-deadline deadline))))))))
 
 ;; ---- the pause menu (Esc / q) ----
 (defn pause-options ()
@@ -2571,6 +2597,145 @@ overlay's colour cycle (the world never steps while paused)."
       ([:key-up _k] (pause-loop w st sel tick deadline))
       (m (pause-handle w st sel tick deadline m))
       (after (wait-ms deadline) (pause-loop w st sel (+ tick 1) (next-deadline deadline))))))
+
+;; ---- the victory finale (a match win) ----
+(defn win-explode (st)
+  "One detonation of the victory barrage: a big burst at a random point on the
+COURT plus one in the STAND that tears a spectator out of their seat — re-kicking
+the flash + shake. Threads the PRNG."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        [a s1] (rand-float (get st :s))
+        [b s2] (rand-float s1)
+        [c s3] (rand-float s2)
+        [d s4] (rand-float s3)
+        hue1 (mod (+ (get st :hue) (round (* c 360))) 360)
+        hue2 (mod (+ hue1 137) 360)
+        ncols (max 1 (quot cols *crowd-spacing*))
+        idx (round (* d (- ncols 1)))
+        ccol (* idx *crowd-spacing*)
+        ccy (+ rows (quot *crowd-rows* 2))
+        kicked (assoc st
+                 :s s4
+                 :shake (max (get st :shake) *score-shake*)
+                 :flash *flash-frames*
+                 :flash-hue hue1
+                 :abducted (cons {:col ccol :life *abduct-respawn*} (get st :abducted)))
+        court-blast (spawn-burst kicked (* a cols) (* b rows) *score-particles* *score-speed* hue1))
+    (spawn-burst court-blast ccol ccy *score-particles* *score-speed* hue2)))
+
+(defn win-options ()
+  "The win-screen actions: `[label action]` — play again, or back to setup."
+  [["RETRY" :retry] ["MAIN MENU" :menu]])
+
+(defn win-overlay (st sel)
+  "The winner banner + RETRY / MAIN MENU choices over the finale: the winning side's
+name huge in its colour, the final score, and the two actions (the highlighted one
+barred + brighter)."
+  (let (cols (get st :cols)
+        rows (get st :rows)
+        winner (get st :winner)
+        hue (get st :hue)
+        name (if (= winner :left) "LEFT WINS" "RIGHT WINS")
+        wcol (hsv->rgb (+ hue (if (= winner :left) *left-hue* *right-hue*)) 0.6 1.0)
+        opts (win-options)
+        ostart (round (* rows 0.66))
+        oslot (round (* rows 0.11))
+        option-ops (mapcat (fn (i)
+                             (let (label (vector-ref (vector-ref opts i) 0)
+                                   active (= i sel)
+                                   sc (if active
+                                        (min 12 (max 2 (round (* rows 0.05))))
+                                        (max 1 (round (* rows 0.035))))
+                                   row (+ ostart (* i oslot))
+                                   h2 (mod (+ hue (* i 60)) 360)
+                                   fg (if active (hsv->rgb h2 0.4 1.0) [130 140 165])
+                                   bar (if active
+                                         (let (w (+ (* (string-length label) sc) 6)
+                                               c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
+                                           [[:rect (- row 1)
+                                              c
+                                              w
+                                              (+ sc 2)
+                                              {:bg (hsv->rgb h2 0.6 0.25)}]])
+                                         nil))
+                               (concat bar [(menu-text-op cols row label sc fg)])))
+                     (range (count opts))))
+    (concat [(menu-text-op cols
+               (round (* rows 0.28))
+               name
+               (min 16 (max 2 (round (* rows 0.12))))
+               wcol) (menu-text-op cols
+                                                                                                                                                                      (round (* rows
+                                                                                                                                                                               0.48))
+                                                                                                                                                                      (str (get st
+                                                                                                                                                                             :ls)
+                                                                                                                                                                        " - "
+                                                                                                                                                                        (get st
+                                                                                                                                                                          :rs))
+                                                                                                                                                                      (min 12
+                                                                                                                                                                        (max 2
+                                                                                                                                                                          (round (* rows
+                                                                                                                                                                                   0.055))))
+                                                                                                                                                                      [240 240
+                                                                                                                                                                        255])]
+      option-ops)))
+
+(defn win-render (st sel)
+  "The finale frame: the frozen board (the loser's paddle already shattered away),
+the erupting crowd and all the explosion particles, with the winner banner +
+options on top."
+  (into (render st) (win-overlay st sel)))
+
+(defn win-tick (st tick)
+  "Advance the finale one frame WITHOUT stepping physics: fire a fresh detonation on
+the cadence (while the barrage lasts), then cycle the hue, age the particles +
+flash, decay the shake, keep the crowd cheer pegged, age the seat gaps, and fade
+the announce."
+  (let (st1 (if (and (< tick *win-blast-frames*) (= 0 (mod tick *win-blast-every*)))
+              (win-explode st)
+              st))
+    (assoc st1
+      :hue (mod (+ (get st1 :hue) *hue-step*) 360)
+      :particles (step-particles (get st1 :particles))
+      :flash (max 0 (- (get st1 :flash) 1))
+      :shake (* (get st1 :shake) *shake-decay*)
+      :cheer *cheer-frames*
+      :announce-life (max 0 (- (get st1 :announce-life) 1))
+      :abducted (filter (fn (a) (> (get a :life) 0))
+                  (map (fn (a) (assoc a :life (- (get a :life) 1))) (get st1 :abducted))))))
+
+(defn win-act (w st sel)
+  "Carry out the chosen win-screen action (re-reading the window size): RETRY plays
+a fresh match with the SAME settings (the stored `:config`), MAIN MENU returns to
+setup."
+  (let ([c r] (gui-size w))
+    (if (= sel 0)
+      (loop w (init c (court-rows r) (now-ns) (get st :config)) (fresh-deadline))
+      (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))))
+
+(defn win-handle (w st sel tick deadline m)
+  "Dispatch a win-screen keypress `m`: the window X / Ctrl-C quit, up/down move the
+highlight, ENTER/Space fire the action, anything else is ignored."
+  (cond
+    (or (= m :close) (= m :ctrl-c)) (gui-close w)
+    (menu-up? m) (win-loop w st (mod (- sel 1) 2) tick deadline)
+    (menu-down? m) (win-loop w st (mod (+ sel 1) 2) tick deadline)
+    (menu-select? m) (win-act w st sel)
+    :else (win-loop w st sel tick deadline)))
+
+(defn win-loop (w st sel tick deadline)
+  "The match is WON: the board, the loser and the crowd erupt in a rolling explosion
+while the winner banner + RETRY / MAIN MENU options hold — no physics runs. Up/down
+pick, ENTER/Space fire; the window X / Ctrl-C quit."
+  (do
+    (gui-draw w (win-render st sel))
+    (receive
+      ([:resize cols rows] (win-loop w (refit st cols rows) sel tick deadline))
+      ([:key-up _k] (win-loop w st sel tick deadline))
+      (m (win-handle w st sel tick deadline m))
+      (after (wait-ms deadline)
+        (win-loop w (win-tick st tick) sel (+ tick 1) (next-deadline deadline))))))
 
 ;; ---- the opening menu ----
 (defn menu-step-options (step)

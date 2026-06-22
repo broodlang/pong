@@ -2474,10 +2474,25 @@ pause (so resuming doesn't fire a burst of catch-up ticks)."
 the pause menu, so nothing ever exits a match without a prompt.)"
   (or (= m :escape) (= m "q") (= m "Q")))
 
+;; Was Brood built with audio? `audio-beep` is a native builtin gated on
+;; `--features audio`; without the feature the symbol is simply UNBOUND, so a
+;; bare call would error rather than no-op. Resolved once at load — when false,
+;; `beep!` skips every tone.
+(def *audio?* (bound? 'audio-beep))
+
+(defn beep! (freq ms & vol)
+  "Play a tone through `audio-beep`, but only when audio is compiled in (see
+`*audio?*`) — so the same source runs on a Brood built without `--features
+audio`, it just stays silent. Pass an optional peak `vol` like `audio-beep`.
+(With the feature, `audio-beep` is itself a no-op when muted / no device; this
+guards the harder case where the builtin doesn't exist at all.)"
+  (when *audio?*
+    (apply audio-beep freq ms vol)))
+
 (defn play-sounds! (old new)
   "Play this frame's sound effects by DIFFING the previous (`old`) and new (`new`)
 world — keeping the game core pure (it never beeps; only the loop does, so tests
-stay silent). Returns `new`. `audio-beep` is itself a no-op when muted / no device.
+stay silent). Returns `new`. `beep!` is a no-op when audio isn't compiled in, muted, or there's no device.
 The crowd / pickup / gunshot voices sit LOW in the mix (small `vol`) so the paddle
 hit and point tone stay on top.
  - paddle hit: the rally (shot count) ticked up — pitch rises with the rally
@@ -2492,26 +2507,26 @@ hit and point tone stay on top.
         exc (crowd-excitement new))
     (do
       (when (> nr pr)
-        (audio-beep (+ 300 (* 14 (min nr 20))) 35))
+        (beep! (+ 300 (* 14 (min nr 20))) 35))
       (when (and (> exc 0.4) (= 0 (mod (get new :t) 22)))
-        (audio-beep (+ 70 (* 30 exc)) 130 0.06))
+        (beep! (+ 70 (* 30 exc)) 130 0.06))
       (when (> (wave-count nr) (wave-count pr))
-        (audio-beep (+ 60 (* 12 (wave-count nr))) 240 0.09))
+        (beep! (+ 60 (* 12 (wave-count nr))) 240 0.09))
       (when (and (> pr 0) (= nr 0))
         (do
-          (audio-beep 660 150)
-          (audio-beep 90 320 0.12)))
+          (beep! 660 150)
+          (beep! 90 320 0.12)))
       (when (> (count (get new :bullets)) (count (get old :bullets)))
-        (audio-beep 150 22 0.12))
+        (beep! 150 22 0.12))
       (when (or (> (get new :l-ammo) (get old :l-ammo))
               (> (get new :r-ammo) (get old :r-ammo))
               (not (= (get new :l-gun) (get old :l-gun)))
               (not (= (get new :r-gun) (get old :r-gun)))
               (> (count (get new :l-fx)) (count (get old :l-fx)))
               (> (count (get new :r-fx)) (count (get old :r-fx))))
-        (audio-beep 880 90 0.12))
+        (beep! 880 90 0.12))
       (when (or (> (get new :l-dmg) (get old :l-dmg)) (> (get new :r-dmg) (get old :r-dmg)))
-        (audio-beep 110 70))
+        (beep! 110 70))
       new)))
 
 (defn loop (w st deadline)
@@ -3067,19 +3082,20 @@ the game `loop` on a fresh world fitted to the court portion of the window."
   "Dispatch a menu keypress `m`: quit, move the highlight, or confirm — starting
 the match once the final step is confirmed, else staying on the (advanced) menu.
 Each action plays a short UI sound (a soft blip on move, a confirm tone per step,
-and a two-note fanfare when the match opens); `audio-beep` is a no-op when muted."
+and a two-note fanfare when the match opens); `beep!` is a no-op when audio
+isn't compiled in or is muted."
   (cond
     (quit? m) (gui-close w)
-    (menu-up? m) (do (audio-beep 520 18 0.12) (menu-loop w (menu-move menu -1) deadline))
-    (menu-down? m) (do (audio-beep 470 18 0.12) (menu-loop w (menu-move menu 1) deadline))
+    (menu-up? m) (do (beep! 520 18 0.12) (menu-loop w (menu-move menu -1) deadline))
+    (menu-down? m) (do (beep! 470 18 0.12) (menu-loop w (menu-move menu 1) deadline))
     (menu-select? m) (let (menu2 (menu-confirm menu))
                        (if (= (get menu2 :step) :done)
                          (do
-                           (audio-beep 784 60 0.16)
-                           (audio-beep 1047 110 0.16)
+                           (beep! 784 60 0.16)
+                           (beep! 1047 110 0.16)
                            (start-match w menu2))
                          (do
-                           (audio-beep 700 45 0.14)
+                           (beep! 700 45 0.14)
                            (menu-loop w menu2 deadline))))
     :else (menu-wait w menu deadline)))
 

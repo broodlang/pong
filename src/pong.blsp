@@ -2515,25 +2515,38 @@ hit and point tone stay on top.
       new)))
 
 (defn loop (w st deadline)
-  "Draw the world, then park in `(receive)` until the frame `deadline`: a
-`[:resize]` refits and redraws, Esc / q open the PAUSE menu (never a silent quit),
-the window's X / Ctrl-C tear down, a paddle key press / `[:key-up]` release steers
-a human paddle, and the `(after)` timeout advances one physics tick. Pacing against
-an absolute deadline keeps the frame interval even — what makes motion read smooth."
+  "Draw the world once, then hand off to `loop-wait` to park for the rest of the
+frame. Pacing against an absolute deadline keeps the frame interval even — what
+makes motion read smooth. The draw lives HERE, not in `loop-wait`, so a frame is
+rendered exactly once per physics tick (plus on resize) — never once per key
+event. Coupling redraws to keystrokes is what made player-vs-player jitter: two
+humans holding keys flood the loop with input, and each re-render of the (heavy)
+`render` op-vector churns allocation between ticks. Key presses only flip paddle
+direction / shoot flags; nothing visible moves until the next `step`, so re-parking
+without redrawing costs no responsiveness."
   (do
     (gui-draw w (render st))
-    (receive
-      ([:resize cols rows] (loop w (refit st cols rows) deadline))
-      ([:key-up k] (loop w (release-key st k) deadline))
-      (m (cond
-           (or (= m :close) (= m :ctrl-c)) (gui-close w)
-           (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
-           :else (loop w (press-key st m) deadline)))
-      (after (wait-ms deadline)
-        (let (st2 (play-sounds! st (step st)))
-          (if (get st2 :winner)
-            (win-loop w st2 0 0 (next-deadline deadline))
-            (loop w st2 (next-deadline deadline))))))))
+    (loop-wait w st deadline)))
+
+(defn loop-wait (w st deadline)
+  "Park in `(receive)` until the frame `deadline` WITHOUT redrawing: a `[:resize]`
+refits and bounces back to `loop` (which redraws at the new size), Esc / q open the
+PAUSE menu (never a silent quit), the window's X / Ctrl-C tear down, a paddle key
+press / `[:key-up]` release steers a human paddle and re-parks (no redraw — the
+paddle hasn't moved yet), and the `(after)` timeout advances one physics tick and
+draws the result via `loop`."
+  (receive
+    ([:resize cols rows] (loop w (refit st cols rows) deadline))
+    ([:key-up k] (loop-wait w (release-key st k) deadline))
+    (m (cond
+         (or (= m :close) (= m :ctrl-c)) (gui-close w)
+         (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
+         :else (loop-wait w (press-key st m) deadline)))
+    (after (wait-ms deadline)
+      (let (st2 (play-sounds! st (step st)))
+        (if (get st2 :winner)
+          (win-loop w st2 0 0 (next-deadline deadline))
+          (loop w st2 (next-deadline deadline)))))))
 
 ;; ---- the pause menu (Esc / q) ----
 (defn pause-options ()
@@ -2625,20 +2638,28 @@ up/down move the highlight, ENTER/Space fire the action, anything else is ignore
     (menu-up? m) (pause-loop w st (mod (- sel 1) 3) tick deadline)
     (menu-down? m) (pause-loop w st (mod (+ sel 1) 3) tick deadline)
     (menu-select? m) (pause-act w st sel)
-    :else (pause-loop w st sel tick deadline)))
+    :else (pause-wait w st sel tick deadline)))
 
 (defn pause-loop (w st sel tick deadline)
-  "The match is FROZEN under the pause overlay: redraw the held frame plus the
-overlay each tick, park in `(receive)` — resize re-fits, key releases are ignored,
-a keypress dispatches via `pause-handle`, and the frame timeout only advances the
-overlay's colour cycle (the world never steps while paused)."
+  "The match is FROZEN under the pause overlay: draw the held frame plus the overlay
+once, then hand off to `pause-wait`. As in `loop`, the draw lives here (not in the
+wait) so key releases / ignored keys re-park without re-rendering; only a tick (the
+colour cycle), a resize, or a highlight move redraws. The world never steps while
+paused."
   (do
     (gui-draw w (into (render st) (pause-ops st sel tick)))
-    (receive
-      ([:resize cols rows] (pause-loop w (refit st cols rows) sel tick deadline))
-      ([:key-up _k] (pause-loop w st sel tick deadline))
-      (m (pause-handle w st sel tick deadline m))
-      (after (wait-ms deadline) (pause-loop w st sel (+ tick 1) (next-deadline deadline))))))
+    (pause-wait w st sel tick deadline)))
+
+(defn pause-wait (w st sel tick deadline)
+  "Park in `(receive)` under the pause overlay: resize re-fits and redraws, key
+releases are ignored (re-park, no redraw), a keypress dispatches via `pause-handle`
+(navigation redraws via `pause-loop`; ignored keys re-park here), and the frame
+timeout advances the overlay's colour cycle."
+  (receive
+    ([:resize cols rows] (pause-loop w (refit st cols rows) sel tick deadline))
+    ([:key-up _k] (pause-wait w st sel tick deadline))
+    (m (pause-handle w st sel tick deadline m))
+    (after (wait-ms deadline) (pause-loop w st sel (+ tick 1) (next-deadline deadline)))))
 
 ;; ---- the victory finale (a match win) ----
 (defn win-explode (st)
@@ -2767,20 +2788,29 @@ highlight, ENTER/Space fire the action, anything else is ignored."
     (menu-up? m) (win-loop w st (mod (- sel 1) 2) tick deadline)
     (menu-down? m) (win-loop w st (mod (+ sel 1) 2) tick deadline)
     (menu-select? m) (win-act w st sel)
-    :else (win-loop w st sel tick deadline)))
+    :else (win-wait w st sel tick deadline)))
 
 (defn win-loop (w st sel tick deadline)
   "The match is WON: the board, the loser and the crowd erupt in a rolling explosion
-while the winner banner + RETRY / MAIN MENU options hold — no physics runs. Up/down
-pick, ENTER/Space fire; the window X / Ctrl-C quit."
+while the winner banner + RETRY / MAIN MENU options hold — no physics runs. Draws the
+finale frame once, then hands off to `win-wait` so key releases / ignored keys don't
+force a re-render; the explosion advances on the tick. Up/down pick, ENTER/Space fire;
+the window X / Ctrl-C quit."
   (do
     (gui-draw w (win-render st sel))
-    (receive
-      ([:resize cols rows] (win-loop w (refit st cols rows) sel tick deadline))
-      ([:key-up _k] (win-loop w st sel tick deadline))
-      (m (win-handle w st sel tick deadline m))
-      (after (wait-ms deadline)
-        (win-loop w (win-tick st tick) sel (+ tick 1) (next-deadline deadline))))))
+    (win-wait w st sel tick deadline)))
+
+(defn win-wait (w st sel tick deadline)
+  "Park in `(receive)` during the victory finale: resize re-fits and redraws, key
+releases are ignored (re-park, no redraw), a keypress dispatches via `win-handle`
+(navigation redraws via `win-loop`; ignored keys re-park here), and the frame timeout
+advances the explosion via `win-tick`."
+  (receive
+    ([:resize cols rows] (win-loop w (refit st cols rows) sel tick deadline))
+    ([:key-up _k] (win-wait w st sel tick deadline))
+    (m (win-handle w st sel tick deadline m))
+    (after (wait-ms deadline)
+      (win-loop w (win-tick st tick) sel (+ tick 1) (next-deadline deadline)))))
 
 ;; ---- the opening menu ----
 (defn menu-step-options (step)
@@ -3051,23 +3081,30 @@ and a two-note fanfare when the match opens); `audio-beep` is a no-op when muted
                          (do
                            (audio-beep 700 45 0.14)
                            (menu-loop w menu2 deadline))))
-    :else (menu-loop w menu deadline)))
+    :else (menu-wait w menu deadline)))
 
 (defn menu-loop (w menu deadline)
-  "Draw the opening menu and park in `(receive)`: a `[:resize]` re-fits it, a quit
-message tears down, up/down move the highlight, ENTER/Space confirms (advancing a
-step, or opening the match once every choice is made), key releases are ignored,
-and the frame timeout just advances the title's colour cycle."
+  "Draw the opening menu once, then hand off to `menu-wait`. As in `loop`, the draw
+lives here (not in the wait) so key releases / ignored keys re-park without
+re-rendering; only a tick (the title's colour cycle), a resize, or a highlight move
+redraws."
   (do
     (gui-draw w (render-menu menu))
-    (receive
-      ([:resize cols rows] (menu-loop w (assoc menu :cols cols :rows rows) deadline))
-      ([:key-up _k] (menu-loop w menu deadline))
-      (m (menu-handle w menu deadline m))
-      (after (wait-ms deadline)
-        (menu-loop w
-          (assoc menu :hue (mod (+ (get menu :hue) 2) 360) :t (+ (get menu :t) 1))
-          (next-deadline deadline))))))
+    (menu-wait w menu deadline)))
+
+(defn menu-wait (w menu deadline)
+  "Park in `(receive)` on the opening menu: a `[:resize]` re-fits and redraws, a quit
+message tears down, a keypress dispatches via `menu-handle` (navigation / confirm
+redraw via `menu-loop`; ignored keys re-park here), key releases are ignored, and the
+frame timeout advances the title's colour cycle."
+  (receive
+    ([:resize cols rows] (menu-loop w (assoc menu :cols cols :rows rows) deadline))
+    ([:key-up _k] (menu-wait w menu deadline))
+    (m (menu-handle w menu deadline m))
+    (after (wait-ms deadline)
+      (menu-loop w
+        (assoc menu :hue (mod (+ (get menu :hue) 2) 360) :t (+ (get menu :t) 1))
+        (next-deadline deadline)))))
 
 (defn run ()
   "Open a maximised window and run Brood Pong — first the opening MENU (mode, AI

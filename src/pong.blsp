@@ -2474,6 +2474,33 @@ pause (so resuming doesn't fire a burst of catch-up ticks)."
 the pause menu, so nothing ever exits a match without a prompt.)"
   (or (= m :escape) (= m "q") (= m "Q")))
 
+(defn play-sounds! (old new)
+  "Play this frame's sound effects by DIFFING the previous (`old`) and new (`new`)
+world — keeping the game core pure (it never beeps; only the loop does, so tests
+stay silent). Returns `new`. `audio-beep` is itself a no-op when muted / no device.
+ - paddle hit: the rally (shot count) ticked up — pitch rises with the rally
+ - point: the rally dropped to 0 from a live exchange
+ - gunshot: a new bullet appeared
+ - power-up: this side gained ammo / a new gun / a fresh effect
+ - crack: a paddle took shot damage"
+  (do
+    (when (> (get new :rally) (get old :rally))
+      (audio-beep (+ 300 (* 14 (min (get new :rally) 20))) 35))
+    (when (and (> (get old :rally) 0) (= (get new :rally) 0))
+      (audio-beep 660 150))
+    (when (> (count (get new :bullets)) (count (get old :bullets)))
+      (audio-beep 150 22))
+    (when (or (> (get new :l-ammo) (get old :l-ammo))
+            (> (get new :r-ammo) (get old :r-ammo))
+            (not (= (get new :l-gun) (get old :l-gun)))
+            (not (= (get new :r-gun) (get old :r-gun)))
+            (> (count (get new :l-fx)) (count (get old :l-fx)))
+            (> (count (get new :r-fx)) (count (get old :r-fx))))
+      (audio-beep 880 90))
+    (when (or (> (get new :l-dmg) (get old :l-dmg)) (> (get new :r-dmg) (get old :r-dmg)))
+      (audio-beep 110 70))
+    new))
+
 (defn loop (w st deadline)
   "Draw the world, then park in `(receive)` until the frame `deadline`: a
 `[:resize]` refits and redraws, Esc / q open the PAUSE menu (never a silent quit),
@@ -2490,7 +2517,7 @@ an absolute deadline keeps the frame interval even — what makes motion read sm
            (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
            :else (loop w (press-key st m) deadline)))
       (after (wait-ms deadline)
-        (let (st2 (step st))
+        (let (st2 (play-sounds! st (step st)))
           (if (get st2 :winner)
             (win-loop w st2 0 0 (next-deadline deadline))
             (loop w st2 (next-deadline deadline))))))))

@@ -2478,28 +2478,41 @@ the pause menu, so nothing ever exits a match without a prompt.)"
   "Play this frame's sound effects by DIFFING the previous (`old`) and new (`new`)
 world — keeping the game core pure (it never beeps; only the loop does, so tests
 stay silent). Returns `new`. `audio-beep` is itself a no-op when muted / no device.
+The crowd / pickup / gunshot voices sit LOW in the mix (small `vol`) so the paddle
+hit and point tone stay on top.
  - paddle hit: the rally (shot count) ticked up — pitch rises with the rally
- - point: the rally dropped to 0 from a live exchange
- - gunshot: a new bullet appeared
- - power-up: this side gained ammo / a new gun / a fresh effect
+ - crowd murmur: a soft, low hum while the crowd is excited — pitch tracks the hype
+ - crowd swell: a low rumble each time another Mexican-wave crest joins in
+ - point: a tone plus a low crowd roar as the stand erupts
+ - gunshot: a quiet low thunk when a new bullet appears
+ - power-up: a quiet chime when this side gains ammo / a new gun / a fresh effect
  - crack: a paddle took shot damage"
-  (do
-    (when (> (get new :rally) (get old :rally))
-      (audio-beep (+ 300 (* 14 (min (get new :rally) 20))) 35))
-    (when (and (> (get old :rally) 0) (= (get new :rally) 0))
-      (audio-beep 660 150))
-    (when (> (count (get new :bullets)) (count (get old :bullets)))
-      (audio-beep 150 22))
-    (when (or (> (get new :l-ammo) (get old :l-ammo))
-            (> (get new :r-ammo) (get old :r-ammo))
-            (not (= (get new :l-gun) (get old :l-gun)))
-            (not (= (get new :r-gun) (get old :r-gun)))
-            (> (count (get new :l-fx)) (count (get old :l-fx)))
-            (> (count (get new :r-fx)) (count (get old :r-fx))))
-      (audio-beep 880 90))
-    (when (or (> (get new :l-dmg) (get old :l-dmg)) (> (get new :r-dmg) (get old :r-dmg)))
-      (audio-beep 110 70))
-    new))
+  (let (pr (get old :rally)
+        nr (get new :rally)
+        exc (crowd-excitement new))
+    (do
+      (when (> nr pr)
+        (audio-beep (+ 300 (* 14 (min nr 20))) 35))
+      (when (and (> exc 0.4) (= 0 (mod (get new :t) 22)))
+        (audio-beep (+ 70 (* 30 exc)) 130 0.06))
+      (when (> (wave-count nr) (wave-count pr))
+        (audio-beep (+ 60 (* 12 (wave-count nr))) 240 0.09))
+      (when (and (> pr 0) (= nr 0))
+        (do
+          (audio-beep 660 150)
+          (audio-beep 90 320 0.12)))
+      (when (> (count (get new :bullets)) (count (get old :bullets)))
+        (audio-beep 150 22 0.12))
+      (when (or (> (get new :l-ammo) (get old :l-ammo))
+              (> (get new :r-ammo) (get old :r-ammo))
+              (not (= (get new :l-gun) (get old :l-gun)))
+              (not (= (get new :r-gun) (get old :r-gun)))
+              (> (count (get new :l-fx)) (count (get old :l-fx)))
+              (> (count (get new :r-fx)) (count (get old :r-fx))))
+        (audio-beep 880 90 0.12))
+      (when (or (> (get new :l-dmg) (get old :l-dmg)) (> (get new :r-dmg) (get old :r-dmg)))
+        (audio-beep 110 70))
+      new)))
 
 (defn loop (w st deadline)
   "Draw the world, then park in `(receive)` until the frame `deadline`: a
@@ -3022,15 +3035,22 @@ the game `loop` on a fresh world fitted to the court portion of the window."
 
 (defn menu-handle (w menu deadline m)
   "Dispatch a menu keypress `m`: quit, move the highlight, or confirm — starting
-the match once the final step is confirmed, else staying on the (advanced) menu."
+the match once the final step is confirmed, else staying on the (advanced) menu.
+Each action plays a short UI sound (a soft blip on move, a confirm tone per step,
+and a two-note fanfare when the match opens); `audio-beep` is a no-op when muted."
   (cond
     (quit? m) (gui-close w)
-    (menu-up? m) (menu-loop w (menu-move menu -1) deadline)
-    (menu-down? m) (menu-loop w (menu-move menu 1) deadline)
+    (menu-up? m) (do (audio-beep 520 18 0.12) (menu-loop w (menu-move menu -1) deadline))
+    (menu-down? m) (do (audio-beep 470 18 0.12) (menu-loop w (menu-move menu 1) deadline))
     (menu-select? m) (let (menu2 (menu-confirm menu))
                        (if (= (get menu2 :step) :done)
-                         (start-match w menu2)
-                         (menu-loop w menu2 deadline)))
+                         (do
+                           (audio-beep 784 60 0.16)
+                           (audio-beep 1047 110 0.16)
+                           (start-match w menu2))
+                         (do
+                           (audio-beep 700 45 0.14)
+                           (menu-loop w menu2 deadline))))
     :else (menu-loop w menu deadline)))
 
 (defn menu-loop (w menu deadline)

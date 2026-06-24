@@ -653,8 +653,7 @@ so the tint sums up what's on it."
   (let (fx (side-fx st side))
     (if (= 0 (count fx))
       base
-      (blend-rgbs (cons base
-                    (map (fn (e) (hsv->rgb (if (get e :good?) *good-hue* *bad-hue*) 0.85 1.0)) fx))))))
+      (blend-rgbs (cons base (map (fn (e) (hsv->rgb (if (get e :good?) *good-hue* *bad-hue*) 0.85 1.0)) fx))))))
 
 ;; ---- the AI players ----
 (defn ai-track (paddle-top target-center rows ph speed)
@@ -1212,9 +1211,7 @@ item-free game), 1 is the base flow, 2 packs the court (insane mode)."
 
 (defn age-effects (st)
   "Tick down both sides' active effects, dropping any that have expired."
-  (let (age (fn (fx)
-              (filter (fn (e) (> (get e :life) 0))
-                (map (fn (e) (assoc e :life (- (get e :life) 1))) fx))))
+  (let (age (fn (fx) (filter (fn (e) (> (get e :life) 0)) (map (fn (e) (assoc e :life (- (get e :life) 1))) fx))))
     (assoc st :l-fx (age (get st :l-fx)) :r-fx (age (get st :r-fx)))))
 
 ;; ---- wind ----
@@ -1241,13 +1238,7 @@ every target is a violent `*storm-max*` gale. Threads the PRNG."
                                    storm? *storm-max*
                                    (< p *wind-still-chance*) *wind-still*
                                    :else *wind-max*))
-                         [(assoc st
-                            :wind-tx (* (- (* 2 a) 1) mag)
-                            :wind-ty (* (- (* 2 b) 1) mag)
-                            :s s3) (if storm?
-                                                                                                                                                                                               (quot *wind-period*
-                                                                                                                                                                                                 2)
-                                                                                                                                                                                               *wind-period*)]))
+                         [(assoc st :wind-tx (* (- (* 2 a) 1) mag) :wind-ty (* (- (* 2 b) 1) mag) :s s3) (if storm? (quot *wind-period* 2) *wind-period*)]))
         ease (fn (cur tgt) (+ cur (* *wind-ease* (- tgt cur)))))
     (assoc st1
       :wind-x (ease (get st1 :wind-x) (get st1 :wind-tx))
@@ -1514,8 +1505,7 @@ PRNG. Tail-recursive; returns `[signs s']`."
   "Age the held-up placards (dropping any whose ~10 s elapsed). While a batch is
 up, hold the gap timer; once they've all dropped, count the short gap down and
 pop a fresh batch."
-  (let (alive (filter (fn (sg) (> (get sg :life) 0))
-                (map (fn (sg) (assoc sg :life (- (get sg :life) 1))) (get st :signs))))
+  (let (alive (filter (fn (sg) (> (get sg :life) 0)) (map (fn (sg) (assoc sg :life (- (get sg :life) 1))) (get st :signs))))
     (if (> (count alive) 0)
       (assoc st :signs alive :sign-timer *sign-gap*)
       (let (timer (- (get st :sign-timer) 1))
@@ -1729,9 +1719,7 @@ reads during the pause."
 (walls, paddles, powerup pickups, a point). `step` calls this `n` times a frame so a
 fast (high game-difficulty) ball covers more ground without any single move
 exceeding a paddle's width and tunnelling straight through it."
-  (let (moved (assoc st
-                :bx (+ (get st :bx) (* (get st :vx) perstep))
-                :by (+ (get st :by) (* (get st :vy) perstep))))
+  (let (moved (assoc st :bx (+ (get st :bx) (* (get st :vx) perstep)) :by (+ (get st :by) (* (get st :vy) perstep))))
     (score (collect-powerups (bounce-paddles (bounce-walls moved))))))
 
 (defn step (st)
@@ -1933,16 +1921,7 @@ net mesh filling each mouth, with bright posts framing it top and bottom."
 dimmer and more saturated the older it is, oldest first so the ball paints over
 its own freshest trail."
   (let (n (count trail))
-    (reverse (first (reduce (fn ([ops i] t)
-                              (let (f (- 1 (/ i (max 1 n)))
-                                    op [:rect (floor (get t :y))
-                                         (floor (get t :x))
-                                         *ball-w*
-                                         *ball-h*
-                                         {:bg (hsv->rgb (get t :hue) 0.85 (* 0.55 f f))}])
-                                [(cons op ops) (+ i 1)]))
-                      [nil 0]
-                      trail)))))
+    (reverse (first (reduce (fn ([ops i] t) (let (f (- 1 (/ i (max 1 n))) op [:rect (floor (get t :y)) (floor (get t :x)) *ball-w* *ball-h* {:bg (hsv->rgb (get t :hue) 0.85 (* 0.55 f f))}]) [(cons op ops) (+ i 1)])) [nil 0] trail)))))
 
 (defn particle-ops (ps)
   "Every live explosion particle as a small 2×1 block, its hue fixed at birth and
@@ -2114,11 +2093,7 @@ while its beam reaches its target — a faint green tractor beam down into the s
             light-l [:rect (+ uy 1) (+ x 1) 1 1 {:bg blink}]
             light-r [:rect (+ uy 1) (+ x (- *ufo-w* 2)) 1 1 {:bg blink}]
             beam (if beam?
-                   [[:rect (+ uy 2)
-                      (- (get ufo :target) 1)
-                      3
-                      (- (+ rows *crowd-rows*) (+ uy 2))
-                      {:bg (hsv->rgb 130 0.85 0.32)}]]
+                   [[:rect (+ uy 2) (- (get ufo :target) 1) 3 (- (+ rows *crowd-rows*) (+ uy 2)) {:bg (hsv->rgb 130 0.85 0.32)}]]
                    nil))
         (concat [dome body light-l light-r] beam)))))
 
@@ -2216,10 +2191,7 @@ effect's `:life` runs down — so you can see what's active and for how much lon
 
 (defn side-fx-ops (effs x0)
   "Stack a side's active-effect badges down from the top edge at column `x0`."
-  (first (reduce (fn ([ops row] eff)
-                   [(concat ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)])
-           [nil *fx-badge-top*]
-           effs)))
+  (first (reduce (fn ([ops row] eff) [(concat ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)]) [nil *fx-badge-top*] effs)))
 
 (defn effect-indicator-ops (st cols)
   "Active-effect badges in the top corners — left side's effects top-left, right
@@ -2238,13 +2210,7 @@ side's top-right — each counting its remaining time down."
 (bright yellow when armed, dim when empty), and a row of pips run inward."
   (let (badge (fn (gun n x pip-dir)
                 (let (col (if (> n 0) [255 232 110] [96 96 116]))
-                  (concat [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1
-                                                                                                       (+ x
-                                                                                                         4)
-                                                                                                       (str n)
-                                                                                                       {:scale 4
-                                                                                                        :fg col
-                                                                                                        :bold true}]]
+                  (concat [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1 (+ x 4) (str n) {:scale 4 :fg col :bold true}]]
                     ;; pips trailing inward, one per shot (capped so they don't run on)
                     (map (fn (i) [:rect 5 (+ x (* pip-dir (* (+ i 1) 3))) 2 1 {:bg col}])
                       (range (min n 14)))))))
@@ -2257,11 +2223,7 @@ when cracked (`dmg` 1), and GONE when broken (`dmg` 2)."
   (cond
     (>= dmg 2) nil
     (= dmg 1) (let (half (quot ph 2))
-                [[:rect top px *paddle-w* (max 1 (- half 1)) face] [:rect (+ top half 1)
-                                                                     px
-                                                                     *paddle-w*
-                                                                     (max 1 (- ph half 1))
-                                                                     face]])
+                [[:rect top px *paddle-w* (max 1 (- half 1)) face] [:rect (+ top half 1) px *paddle-w* (max 1 (- ph half 1)) face]])
     :else [[:rect top px *paddle-w* ph face]]))
 
 (defn announce-ops (st cols rows)
@@ -2553,10 +2515,7 @@ draws the result via `loop`."
   (receive
     ([:resize cols rows] (loop w (refit st cols rows) deadline))
     ([:key-up k] (loop-wait w (release-key st k) deadline))
-    (m (cond
-         (or (= m :close) (= m :ctrl-c)) (gui-close w)
-         (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
-         :else (loop-wait w (press-key st m) deadline)))
+    (m (cond (or (= m :close) (= m :ctrl-c)) (gui-close w) (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline)) :else (loop-wait w (press-key st m) deadline)))
     (after (wait-ms deadline)
       (let (st2 (play-sounds! st (step st)))
         (if (get st2 :winner)
@@ -2599,11 +2558,7 @@ players' keys with who drives each side."
                                    bar (if active
                                          (let (w (+ (* (string-length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
-                                           [[:rect (- row 1)
-                                              c
-                                              w
-                                              (+ sc 2)
-                                              {:bg (hsv->rgb h2 0.6 0.25)}]])
+                                           [[:rect (- row 1) c w (+ sc 2) {:bg (hsv->rgb h2 0.6 0.25)}]])
                                          nil))
                                (concat bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts)))
@@ -2626,8 +2581,7 @@ players' keys with who drives each side."
                                                                                         px
                                                                                         pw
                                                                                         ph
-                                                                                        {:bg [14 16
-                                                                                               28]}]
+                                                                                        {:bg [14 16 28]}]
               (menu-text-op cols
                 (+ py (round (* ph 0.08)))
                 "PAUSED"
@@ -2734,32 +2688,11 @@ barred + brighter)."
                                    bar (if active
                                          (let (w (+ (* (string-length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
-                                           [[:rect (- row 1)
-                                              c
-                                              w
-                                              (+ sc 2)
-                                              {:bg (hsv->rgb h2 0.6 0.25)}]])
+                                           [[:rect (- row 1) c w (+ sc 2) {:bg (hsv->rgb h2 0.6 0.25)}]])
                                          nil))
                                (concat bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts))))
-    (concat [(menu-text-op cols
-               (round (* rows 0.28))
-               name
-               (min 16 (max 2 (round (* rows 0.12))))
-               wcol) (menu-text-op cols
-                                                                                                                                                                      (round (* rows
-                                                                                                                                                                               0.48))
-                                                                                                                                                                      (str (get st
-                                                                                                                                                                             :ls)
-                                                                                                                                                                        " - "
-                                                                                                                                                                        (get st
-                                                                                                                                                                          :rs))
-                                                                                                                                                                      (min 12
-                                                                                                                                                                        (max 2
-                                                                                                                                                                          (round (* rows
-                                                                                                                                                                                   0.055))))
-                                                                                                                                                                      [240 240
-                                                                                                                                                                        255])]
+    (concat [(menu-text-op cols (round (* rows 0.28)) name (min 16 (max 2 (round (* rows 0.12)))) wcol) (menu-text-op cols (round (* rows 0.48)) (str (get st :ls) " - " (get st :rs)) (min 12 (max 2 (round (* rows 0.055)))) [240 240 255])]
       option-ops)))
 
 (defn win-render (st sel)
@@ -2773,9 +2706,7 @@ options on top."
 the cadence (while the barrage lasts), then cycle the hue, age the particles +
 flash, decay the shake, keep the crowd cheer pegged, age the seat gaps, and fade
 the announce."
-  (let (st1 (if (and (< tick *win-blast-frames*) (= 0 (mod tick *win-blast-every*)))
-              (win-explode st)
-              st))
+  (let (st1 (if (and (< tick *win-blast-frames*) (= 0 (mod tick *win-blast-every*))) (win-explode st) st))
     (assoc st1
       :hue (mod (+ (get st1 :hue) *hue-step*) 360)
       :particles (step-particles (get st1 :particles))
@@ -3014,22 +2945,10 @@ breadcrumb of the choices made, and the controls hint."
         rows (get menu :rows)
         hue (get menu :hue)
         crumb (menu-breadcrumb menu)
-        title-ops [(menu-text-op cols
-                     (round (* rows 0.1))
-                     "BROOD PONG"
-                     (min 16 (max 2 (round (* rows 0.13))))
-                     (hsv->rgb hue 0.45 1.0))]
-        sub-ops [(menu-text-op cols
-                   (round (* rows 0.29))
-                   (menu-step-title (get menu :step))
-                   (min 16 (max 2 (round (* rows 0.055))))
-                   (hsv->rgb (+ hue 50) 0.4 0.95))]
+        title-ops [(menu-text-op cols (round (* rows 0.1)) "BROOD PONG" (min 16 (max 2 (round (* rows 0.13)))) (hsv->rgb hue 0.45 1.0))]
+        sub-ops [(menu-text-op cols (round (* rows 0.29)) (menu-step-title (get menu :step)) (min 16 (max 2 (round (* rows 0.055)))) (hsv->rgb (+ hue 50) 0.4 0.95))]
         crumb-ops (if crumb
-                    [(menu-text-op cols
-                       (round (* rows 0.85))
-                       crumb
-                       (max 1 (round (* rows 0.022)))
-                       [150 160 185])]
+                    [(menu-text-op cols (round (* rows 0.85)) crumb (max 1 (round (* rows 0.022))) [150 160 185])]
                     nil)
         body-ops (cond
                    (= (get menu :step) :difficulty) (menu-stepper-ops menu
@@ -3047,11 +2966,7 @@ breadcrumb of the choices made, and the controls hint."
                                                 10
                                                 (game-descriptor (get menu :game-level)))
                    :else (menu-option-ops menu cols rows))
-        hint-ops [(menu-text-op cols
-                    (round (* rows 0.92))
-                    "W / S  or  UP / DOWN  to choose       ENTER select       ESC quit"
-                    (max 1 (round (* rows 0.02)))
-                    [110 120 140])])
+        hint-ops [(menu-text-op cols (round (* rows 0.92)) "W / S  or  UP / DOWN  to choose       ENTER select       ESC quit" (max 1 (round (* rows 0.02))) [110 120 140])])
     (into [[:clear] [:rect 0 0 cols rows {:bg [8 10 18]}]]
       (concat title-ops sub-ops body-ops crumb-ops hint-ops))))
 

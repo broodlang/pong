@@ -45,7 +45,8 @@
 
 ;;; Allocate many short-lived strings to stress the nursery.
 (defn make-strings (n acc)
-  (if (= n 0) acc
+  (if (= n 0)
+    acc
     (make-strings (- n 1) (cons (str "s" n) acc))))
 
 (defn run-string-deopt-test ()
@@ -54,12 +55,12 @@
     ;; Call hot-adder with a string in NON-tail position (nested let so it's
     ;; not the tail of this function).  The JIT's deopt returns to the _ =>
     ;; arm; on old code this crashes; on new code it raises a type error we catch.
-    (let (caught
-           (try
-             (let (x (first strs))
-               (let (_ (hot-adder x))   ; non-tail: result ignored, crash was here
-                 nil))
-             (fn (e) :caught)))
+    (let (caught (try
+                   (let (x (first strs))
+                     (let (_ (hot-adder x))
+                       ; non-tail: result ignored, crash was here
+                       nil))
+                   (fn (e) :caught)))
       (if (= caught :caught)
         (println "string-deopt test: ok — type error caught, no crash")
         (println "string-deopt test: unexpected success (fix may not have triggered)")))))

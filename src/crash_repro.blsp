@@ -1,0 +1,71 @@
+;;; crash_repro.blsp — reproducer for stale LOCAL handle bugs in the JIT fast path.
+;;;
+;;; Test 1: stale VecId after GC (original fix — dispatch outcome 4 with vector args)
+;;; Test 2: stale StrId after GC (this fix — dispatch _ => arm with string arg)
+;;;   Pattern: JIT-compiled hot-caller makes a non-tail sub-call via jit_dispatch_call
+;;;   slow path → GC fires at the safepoint → cur_argv[str] becomes stale →
+;;;   sub-call returns a non-int → JIT deopts (outcome 1) → _ => arm must read
+;;;   fresh args from roots (not stale cur_argv). Previously crashed at heap.rs:3339.
+(defmodule crash-repro)
+
+;;; ── Test 1: stale vector handle (outcome 4 path) ────────────────────────────
+
+(defn vec-collect (v i acc)
+  (if (< i 0)
+    acc
+    (vec-collect v (- i 1) (cons (nth v i) acc))))
+
+(defn stress-loop (outer)
+  (when (> outer 0)
+    (let (v (into [] (range 100)))
+      (let (result (vec-collect v 99 nil))
+        (stress-loop (- outer 1))))))
+
+;;; ── Test 2: stale string handle (outcome 1 / _ => arm) ──────────────────────
+;;;
+;;; my-str-id: returned unchanged, goes through jit_dispatch_call slow path.
+;;; hot-adder: JIT-compiled (heated with ints), then called with a string arg
+;;;   in non-tail position.  Inside the JIT:
+;;;     - calls my-str-id(x) via brood_rt_call_slow → GC fires → cur_argv stale
+;;;     - tries (+ result 1) → result is string → deopt (outcome 1)
+;;;     - _ => arm: must use fresh roots, not stale cur_argv
+;;; Expected: a Brood type error "(+ expected number, got ...)", NOT a crash.
+
+(defn my-str-id (x) x)
+
+(defn hot-adder (x)
+  (let (r (my-str-id x))
+    (+ r 1)))
+
+;;; Heat hot-adder with integers so the JIT compiles it.
+(defn heat (n)
+  (when (> n 0)
+    (hot-adder n)
+    (heat (- n 1))))
+
+;;; Allocate many short-lived strings to stress the nursery.
+(defn make-strings (n acc)
+  (if (= n 0) acc
+    (make-strings (- n 1) (cons (str "s" n) acc))))
+
+(defn run-string-deopt-test ()
+  (heat 5000)
+  (let (strs (make-strings 300 nil))
+    ;; Call hot-adder with a string in NON-tail position (nested let so it's
+    ;; not the tail of this function).  The JIT's deopt returns to the _ =>
+    ;; arm; on old code this crashes; on new code it raises a type error we catch.
+    (let (caught
+           (try
+             (let (x (first strs))
+               (let (_ (hot-adder x))   ; non-tail: result ignored, crash was here
+                 nil))
+             (fn (e) :caught)))
+      (if (= caught :caught)
+        (println "string-deopt test: ok — type error caught, no crash")
+        (println "string-deopt test: unexpected success (fix may not have triggered)")))))
+
+(println "starting tests...")
+(stress-loop 500)
+(println "test 1 (vector / outcome-4 path): ok")
+(run-string-deopt-test)
+(println "done")

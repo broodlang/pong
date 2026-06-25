@@ -60,7 +60,7 @@
                      (let (_ (hot-adder x))
                        ; non-tail: result ignored, crash was here
                        nil))
-                   (fn (e) :caught)))
+                   (catch e :caught)))
       (if (= caught :caught)
         (println "string-deopt test: ok — type error caught, no crash")
         (println "string-deopt test: unexpected success (fix may not have triggered)")))))

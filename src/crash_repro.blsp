@@ -18,7 +18,7 @@
 (defn stress-loop (outer)
   (when (> outer 0)
     (let (v (into [] (range 100)))
-      (let (result (vec-collect v 99 nil))
+      (let (_ (vec-collect v 99 nil))
         (stress-loop (- outer 1))))))
 
 ;;; ── Test 2: stale string handle (outcome 1 / _ => arm) ──────────────────────

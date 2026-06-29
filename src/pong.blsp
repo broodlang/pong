@@ -9,8 +9,7 @@ sharply-angled return can beat a paddle and score). The whole court is the
 window: all geometry is derived from `gui-size` in character CELLS and refit on
 `[:resize]`. One self-paced process (the window owner) draws a frame, parks in
 `(receive)` on an `(after)` frame timer that quit keys / the window X / paddle
-keys preempt, then steps the world and recurses — the ADR-058 self-clocked loop."
-  (:use editor/display))
+keys preempt, then steps the world and recurses — the ADR-058 self-clocked loop.")
 
 ;; ---- geometry & tuning (all lengths in screen CELLS; speeds in cells/frame) ----
 ;; A mono cell is taller than wide (≈1:2 w:h), so horizontal lengths/speeds are

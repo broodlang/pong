@@ -87,8 +87,16 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *max-substep* 4.0)
 ; frames the loaded-shot graphic (an expanding energy ring on the ball) plays
 (def *charge-glow-frames* 16)
-; max |vy| (rows/frame) at serve — the random launch angle
+; max |vy| (rows/frame) at serve — the launch angle, taken from where the spinner stops
 (def *serve-vy* 0.9)
+;; PRE-SERVE COUNTDOWN: the ball is parked at centre and SPINS for `*countdown-frames*`
+;; (~3 s, shown as a 3-2-1) while a needle whirls around it at a random speed. When
+;; the count hits 0 the spin STOPS and the ball fires off in whatever direction the
+;; needle ended on — so the side (sign of cos) and launch angle (sin) are both random.
+(def *countdown-frames* 180)
+; the spinner's rotation (rad/frame) is random in this band each serve ⇒ random stop
+(def *spin-min* 0.12)
+(def *spin-max* 0.45)
 ; min |vy| after a paddle hit — the ball is never dead-flat (no infinite rally)
 (def *min-vy* 0.5)
 ; cap on |vy| (rows/frame) so english can't make the ball vertical
@@ -794,25 +802,31 @@ A non-numeric `level` falls back to the middle (5)."
       {:ball-mult (+ 1.0 (/ (- lvl 5) 5.0)) :powerup-mult (+ 1.0 (/ (- lvl 5) 5.0))})))
 
 ;; ---- serving & scoring ----
-(defn serve (st dir)
-  "Recentre the ball and launch it toward `dir` (-1 left, +1 right) at a random
-shallow angle, threading the PRNG seed in `st`. Used at kick-off and after a point."
+(defn serve (st)
+  "Park the ball at centre and begin the pre-serve COUNTDOWN: it sits still while a
+needle SPINS around it at a random speed (`:spin-speed`) for `*countdown-frames*`.
+`step-countdown` whirls it and, when the count hits 0, RELEASES the ball in whatever
+direction the needle stopped on — a random side + launch angle. Threads the PRNG.
+Used at kick-off and after a point."
   (let (cols (get st :cols)
         rows (get st :rows)
-        [r s1] (rand-float (get st :s))
-        vy (* *serve-vy* (- (* 2 r) 1)))
-    ; r∈[0,1) ⇒ vy∈[-serve-vy, serve-vy)
+        [a s1] (rand-float (get st :s))
+        [b s2] (rand-float s1))
     (assoc st
       :bx (- (/ cols 2) (/ *ball-w* 2))
       :by (- (/ rows 2) (/ *ball-h* 2))
-      :vx (* dir *ball-vx*)
-      :vy vy
+      ; parked: no motion until the spin stops and releases it
+      :vx 0
+      :vy 0
+      :countdown *countdown-frames*
+      :spin-angle (* b 2 pi)
+      :spin-speed (+ *spin-min* (* a (- *spin-max* *spin-min*)))
       :owner nil
       :in-crowd false
       ; fresh serve resets the rising baseline pace back to base
       :base-vx *ball-vx*
       ; fresh serve: nobody has hit the ball yet, so no powerup pickups
-      :s s1)))
+      :s s2)))
 
 ;; ---- one physics tick ----
 (defn reroll-aim (st)
@@ -1157,14 +1171,14 @@ and `score` turns it into a point."
       hit-right? (paddle-hit (assoc st :owner :right) (- rx *ball-w*) (get st :rp) rph rx by)
       :else st)))
 
-(defn point (st scorer x dir)
+(defn point (st scorer x)
   "Award a point to `scorer` (`:left`/`:right`), exiting at `x`. Resets the rally,
 kicks the hue to a fresh palette, flashes the court, throws a big shake + explosion
 and announces the moment. Paddle damage is NOT repaired by a score (it heals on its
-own timer), so an ordinary point just re-serves toward `dir`. Reaching the match's
-`:win-score` (the menu's points-to-win) instead DECLARES the winner: it sets
-`:winner`, leaves the final score standing, SHATTERS THE LOSER'S PADDLE
-(`*paddle-hits-max*`), and freezes — `loop` then hands off to `win-loop`, which
+own timer), so an ordinary point just re-serves (a fresh spin-countdown picks a random
+side). Reaching the match's `:win-score` (the menu's points-to-win) instead DECLARES
+the winner: it sets `:winner`, leaves the final score standing, SHATTERS THE LOSER'S
+PADDLE (`*paddle-hits-max*`), and freezes — `loop` then hands off to `win-loop`, which
 detonates the board + crowd finale."
   (let (ls (if (= scorer :left) (+ (get st :ls) 1) (get st :ls))
         rs (if (= scorer :right) (+ (get st :rs) 1) (get st :rs))
@@ -1191,17 +1205,17 @@ detonates the board + crowd finale."
         announced (announce boom text hue (if win? *win-announce-life* *announce-life*))
         n (if win? (* *score-particles* 2) *score-particles*)
         blasted (spawn-burst announced x (center (get st :by) *ball-h*) n *score-speed* hue))
-    ;; re-centre the ball either way: an ordinary point plays straight on, a win
+    ;; re-serve either way: an ordinary point starts a fresh spin-countdown, a win
     ;; parks it at centre (frozen — `win-loop` runs the finale and never steps)
-    (serve blasted dir)))
+    (serve blasted)))
 
 (defn score (st)
   "Award a point to whichever player the ball got past (and celebrate), else leave
-`st` be. Serving toward the conceder keeps the rally alternating."
+`st` be. The re-serve's spin picks a random side."
   (let (bx (get st :bx) cols (get st :cols))
     (cond
-      (< (+ bx *ball-w*) 0) (point st :right 0 1)
-      (> bx cols) (point st :left cols -1)
+      (< (+ bx *ball-w*) 0) (point st :right 0)
+      (> bx cols) (point st :left cols)
       :else st)))
 
 ;; ---- power-up tokens ----
@@ -1865,6 +1879,36 @@ reads during the pause."
     :charge-glow (max 0 (- (get st :charge-glow) 1))
     :announce-life (max 0 (- (get st :announce-life) 1))))
 
+(defn step-countdown (st)
+  "A pre-serve COUNTDOWN frame: the ball is HELD at centre while its needle SPINS
+(`:spin-angle` += `:spin-speed`) and the 3-2-1 ticks down. Paddles + crowd + effects
+still animate (players can position and pre-load), but no ball physics runs. When the
+count reaches 0 the spin STOPS and the ball is RELEASED in the needle's final
+direction — side from `cos`, launch angle from `sin`."
+  (let (hue (mod (+ (get st :hue) *hue-step*) 360)
+        w (step-wind (assoc st :hue hue))
+        m (move-ai w)
+        cd (- (get m :countdown) 1)
+        ang (+ (get m :spin-angle) (get m :spin-speed))
+        released? (<= cd 0)
+        launched (assoc m
+                   :countdown (max 0 cd)
+                   :spin-angle ang
+                   :vx (if released? (* (if (>= (cos ang) 0) 1 -1) *ball-vx*) 0)
+                   :vy (if released? (* (sin ang) *serve-vy*) 0))
+        aged (assoc launched
+               :trail (take *trail-len*
+                        (cons {:x (get launched :bx) :y (get launched :by) :hue hue}
+                          (get launched :trail)))
+               :particles (step-particles (get launched :particles))
+               :flash (max 0 (- (get launched :flash) 1))
+               :pop (max 0 (- (get launched :pop) 1))
+               :shake (* (get launched :shake) *shake-decay*)
+               :cheer (max 0 (- (get launched :cheer) 1))
+               :charge-glow (max 0 (- (get launched :charge-glow) 1))
+               :announce-life (max 0 (- (get launched :announce-life) 1))))
+    (step-broke (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged))))))))))))
+
 (defn advance-ball (st perstep)
   "Move the ball by its current velocity × `perstep` and resolve ONE collision pass
 (walls, paddles, powerup pickups, a point). `step` calls this `n` times a frame so a
@@ -1881,50 +1925,58 @@ ball (in `*ball-mult*`-scaled sub-steps so a fast ball can't tunnel), bounce it 
 the walls/paddles, COLLECT any powerup the ball touched, resolve a point, then age
 the trail, particles, flash, crowd cheer, active effects, and floating tokens. Pure
 — `run`'s loop just calls this each frame."
-  (if (> (get st :freeze) 0)
-    (step-frozen st)
-    (let (hue (mod (+ (get st :hue) *hue-step*) 360)
-          w (step-wind (assoc st :hue hue))
-          m (move-ai w)
-          ev (event-kind st)
-          ;; COURT-EVENT physics on the ball's velocity this frame
-          bcy (center (get m :by) *ball-h*)
-          gravity (if (= ev :gravity) *event-gravity* 0)
-          magnet (if (= ev :magnet) (* (if (< bcy (/ (get m :rows) 2)) 1 -1) *event-magnet*) 0)
-          [quake s2] (if (= ev :quake)
-                       (let ([qr s1] (rand-float (get m :s)))
-                         [(* (- (* 2 qr) 1) *event-quake*) s1])
-                       [0 (get m :s)])
-          ;; the wind + event tweaks nudge the ball's velocity, curving its flight
-          vx (clamp-vx (+ (get m :vx) (get w :wind-x)))
-          vy (clamp (+ (get m :vy) (get w :wind-y) gravity magnet quake) (- 0 *max-vy*) *max-vy*)
-          ;; SLOW-MO scales the per-frame travel; an EARTHQUAKE holds a shake
-          scale (if (= ev :slowmo) *slowmo-scale* 1)
-          ;; GAME difficulty scales how far the ball travels per frame; split into
-          ;; `nsub` sub-steps each no longer than `*max-substep*` cells, so even a
-          ;; full-load rocket in insane mode can't tunnel a paddle (sized by the ball's
-          ;; actual x-travel this frame, not just `bmult`).
-          bmult (get m :ball-mult)
-          nsub (max 1 (ceil (/ (* (abs vx) scale bmult) *max-substep*)))
-          perstep (/ (* scale bmult) nsub)
-          b (assoc m
-              :vx vx
-              :vy vy
-              :shake (if (= ev :quake) (max (get m :shake) *event-quake-shake*) (get m :shake))
-              :s s2)
-          r (reduce (fn (s _) (advance-ball s perstep)) b (range nsub))
-          trail (take *trail-len* (cons {:x (get r :bx) :y (get r :by) :hue hue} (get st :trail)))
-          aged (assoc r
-                 :trail trail
-                 :particles (step-particles (get r :particles))
-                 :flash (max 0 (- (get r :flash) 1))
-                 :pop (max 0 (- (get r :pop) 1))
-                 :shake (* (get r :shake) *shake-decay*)
-                 :cheer (max 0 (- (get r :cheer) 1))
-                 :charge-glow (max 0 (- (get r :charge-glow) 1))
-                 :announce-life (max 0 (- (get r :announce-life) 1))))
-      ;; advance the cosmetic + event subsystems (each takes + returns the world)
-      (step-broke (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged)))))))))))))
+  (cond
+    (> (get st :freeze) 0) (step-frozen st)
+    (> (get st :countdown) 0) (step-countdown st)
+    :else (let (hue (mod (+ (get st :hue) *hue-step*) 360)
+                w (step-wind (assoc st :hue hue))
+                m (move-ai w)
+                ev (event-kind st)
+                ;; COURT-EVENT physics on the ball's velocity this frame
+                bcy (center (get m :by) *ball-h*)
+                gravity (if (= ev :gravity) *event-gravity* 0)
+                magnet (if (= ev :magnet)
+                         (* (if (< bcy (/ (get m :rows) 2)) 1 -1) *event-magnet*)
+                         0)
+                [quake s2] (if (= ev :quake)
+                             (let ([qr s1] (rand-float (get m :s)))
+                               [(* (- (* 2 qr) 1) *event-quake*) s1])
+                             [0 (get m :s)])
+                ;; the wind + event tweaks nudge the ball's velocity, curving its flight
+                vx (clamp-vx (+ (get m :vx) (get w :wind-x)))
+                vy (clamp (+ (get m :vy) (get w :wind-y) gravity magnet quake)
+                     (- 0 *max-vy*)
+                     *max-vy*)
+                ;; SLOW-MO scales the per-frame travel; an EARTHQUAKE holds a shake
+                scale (if (= ev :slowmo) *slowmo-scale* 1)
+                ;; GAME difficulty scales how far the ball travels per frame; split into
+                ;; `nsub` sub-steps each no longer than `*max-substep*` cells, so even a
+                ;; full-load rocket in insane mode can't tunnel a paddle (sized by the ball's
+                ;; actual x-travel this frame, not just `bmult`).
+                bmult (get m :ball-mult)
+                nsub (max 1 (ceil (/ (* (abs vx) scale bmult) *max-substep*)))
+                perstep (/ (* scale bmult) nsub)
+                b (assoc m
+                    :vx vx
+                    :vy vy
+                    :shake (if (= ev :quake)
+                             (max (get m :shake) *event-quake-shake*)
+                             (get m :shake))
+                    :s s2)
+                r (reduce (fn (s _) (advance-ball s perstep)) b (range nsub))
+                trail (take *trail-len*
+                        (cons {:x (get r :bx) :y (get r :by) :hue hue} (get st :trail)))
+                aged (assoc r
+                       :trail trail
+                       :particles (step-particles (get r :particles))
+                       :flash (max 0 (- (get r :flash) 1))
+                       :pop (max 0 (- (get r :pop) 1))
+                       :shake (* (get r :shake) *shake-decay*)
+                       :cheer (max 0 (- (get r :cheer) 1))
+                       :charge-glow (max 0 (- (get r :charge-glow) 1))
+                       :announce-life (max 0 (- (get r :announce-life) 1))))
+            ;; advance the cosmetic + event subsystems (each takes + returns the world)
+            (step-broke (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged)))))))))))))
 
 ;; ---- the initial world ----
 (defn init (cols rows s & opts)
@@ -1945,6 +1997,9 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :by (/ rows 2)
        :vx 0
        :vy 0
+       :countdown 0
+       :spin-angle 0
+       :spin-speed 0
        :lp mid
        :rp mid
        :ls 0
@@ -2026,8 +2081,7 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :show-timer (+ *show-min-gap* (mod (+ s 313) (- *show-max-gap* *show-min-gap*)))
        :event nil
        :event-timer (+ *event-min-gap* (mod (+ s 911) (- *event-max-gap* *event-min-gap*)))
-       :s s}
-      (if (= 0 (mod s 2)) -1 1))))
+       :s s})))
 
 (defn refit (st cols rows)
   "Re-fit the world to a resized `cols`×`rows` window, clamping the ball and
@@ -2578,12 +2632,51 @@ the ball over `*charge-glow-frames*` — the visible kick of a loaded hit."
           [:rect top left 1 h {:bg col}]
           [:rect top (+ left w -1) 1 h {:bg col}]]))))
 
+(defn spinner-ops (st)
+  "The pre-serve SPINNER: a needle whirling through the parked ball at `:spin-angle`,
+drawn as a bar of cells (brightest at the hub, fading to the tips) with the horizontal
+step widened ×2 so it reads round on the tall-celled grid. Nil once released."
+  (if (<= (get st :countdown) 0)
+    nil
+    (let (cx (+ (get st :bx) (/ *ball-w* 2))
+          cy (+ (get st :by) (/ *ball-h* 2))
+          ang (get st :spin-angle)
+          dx (* (cos ang) 2)
+          dy (sin ang)
+          len 8
+          hue (mod (+ (get st :hue) 40) 360))
+      (map (fn (k)
+             (let (d (- k len)
+                   v (max 0.35 (- 1 (/ (abs d) (+ len 1)))))
+               [:rect (round (+ cy (* d dy)))
+                 (round (+ cx (* d dx)))
+                 2
+                 1
+                 {:bg (hsv->rgb hue 0.7 v)}]))
+        (range (+ (* 2 len) 1))))))
+
+(defn countdown-ops (st cols rows)
+  "The pre-serve COUNTDOWN readout: the seconds-remaining digit, big and centred above
+the spinning ball, punching bigger as each second ticks over. Nil once released."
+  (let (cd (get st :countdown))
+    (if (<= cd 0)
+      nil
+      (let (secs (max 1 (ceil (/ cd 60.0)))
+            f (/ (mod cd 60) 60.0)
+            scale (max 2 (min 22 (round (* *announce-scale* (+ 1.1 (* 0.7 f))))))
+            text (str secs)
+            hue (mod (get st :hue) 360)
+            col (max 0 (- (floor (/ cols 2)) (floor (/ (* (string-length text) scale) 2))))
+            row (max 0 (- (floor (/ rows 3)) (floor (/ scale 2)))))
+        [[:text row col text {:bold true :scale scale :fg (hsv->rgb hue 0.35 1.0)}]]))))
+
 (defn render (st)
   "The full frame as a render-op vector, composed back-to-front so later ops
 paint on top: the (maybe flashing) court fill and the bottom CROWD (a fixed
 backdrop), then the on-court layer — net, scores, comet trail, explosion
 particles, power-up tokens, the streaker, the paddles, the charged-shot aura and
-ball, and the announcer — all shifted by the current screen-shake offset."
+ball, the pre-serve spinner + countdown, and the announcer — all shifted by the
+current screen-shake offset."
   (let (cols (get st :cols)
         rows (get st :rows)
         hue (get st :hue)
@@ -2613,6 +2706,8 @@ ball, and the announcer — all shifted by the current screen-shake offset."
                 (bullet-ops st)
                 (charge-aura-ops st)
                 [(ball-op st hue)]
+                (spinner-ops st)
+                (countdown-ops st cols rows)
                 (announce-ops st cols rows)))
     (into [[:clear] (bg-op st cols rows)]
       (concat (crowd-ops st cols rows)

@@ -48,26 +48,34 @@
     (is (not (overlap? 0 50 5)))))
 
 (describe "serve"
-  (test "recentres the ball"
-    (let (st (serve (init 200 60 7) 1))
+  (test "parks the ball at centre and starts the spin-countdown"
+    (let (st (serve (init 200 60 7)))
       (is (= (get st :bx) (- (/ 200 2) (/ *ball-w* 2))))
-      (is (= (get st :by) (- (/ 60 2) (/ *ball-h* 2))))))
-  (test "launches toward the requested side at full horizontal speed"
-    (is (= (get (serve (init 200 60 7) 1) :vx) *ball-vx*))
-    (is (= (get (serve (init 200 60 7) -1) :vx) (- 0 *ball-vx*))))
+      (is (= (get st :by) (- (/ 60 2) (/ *ball-h* 2))))
+      (is (= (get st :vx) 0))
+      (is (= (get st :vy) 0))
+      (is (= (get st :countdown) *countdown-frames*))))
+  (test "when the spin stops the ball fires off at full horizontal speed"
+    ;; run the whole countdown; the release sets |vx| = *ball-vx* toward a random side
+    (let (released (reduce (fn (s _) (step s)) (serve (init 200 60 7)) (range *countdown-frames*)))
+      (is (= (get released :countdown) 0))
+      (is (= (abs (get released :vx)) *ball-vx*))))
   (test "advances the PRNG seed"
     (let (st (init 200 60 7))
-      (is (not (= (get (serve st 1) :s) (get st :s)))))))
+      (is (not (= (get (serve st) :s) (get st :s)))))))
 
 (describe "score"
-  (test "a ball past the left wall scores for the right and re-serves right"
+  (test "a ball past the left wall scores for the right and starts a fresh serve"
     (let (st (score (assoc (init 200 60 7) :bx (- 0 *ball-w* 1) :ls 0 :rs 0)))
       (is (= (get st :rs) 1))
-      (is (> (get st :vx) 0))))
-  (test "a ball past the right wall scores for the left and re-serves left"
+      ; parked in a spin-countdown (the release picks a random side)
+      (is (= (get st :vx) 0))
+      (is (= (get st :countdown) *countdown-frames*))))
+  (test "a ball past the right wall scores for the left and starts a fresh serve"
     (let (st (score (assoc (init 200 60 7) :bx 999 :ls 0 :rs 0)))
       (is (= (get st :ls) 1))
-      (is (< (get st :vx) 0))))
+      (is (= (get st :vx) 0))
+      (is (= (get st :countdown) *countdown-frames*))))
   (test "an in-play ball scores nothing"
     (let (st0 (assoc (init 200 60 7) :bx 100 :ls 0 :rs 0)
           st (score st0))
@@ -127,14 +135,14 @@
       (is (= (get st :announce-life) 40))
       (is (= (get st :announce-max) 40))))
   (test "a point at match score declares the winner and shatters the loser"
-    (let (won (point (assoc (init 200 60 7) :ls (- *win-score* 1) :rs 3) :left 200 -1))
+    (let (won (point (assoc (init 200 60 7) :ls (- *win-score* 1) :rs 3) :left 200))
       (is (= (get won :winner) :left))
       (is (= (get won :ls) *win-score*))
       (is (= (get won :rs) 3))
       (is (= (get won :r-dmg) *paddle-hits-max*))
       (is (= (get won :announce) "LEFT WINS!"))))
   (test "an ordinary point increments the score and announces POINT"
-    (let (p (point (assoc (init 200 60 7) :ls 2 :rs 2) :right 0 1))
+    (let (p (point (assoc (init 200 60 7) :ls 2 :rs 2) :right 0))
       (is (= (get p :rs) 3))
       (is (= (get p :announce) "POINT!")))))
 
@@ -277,7 +285,7 @@
 ; quiet sits lower (less lifted)
 (describe "crowd"
   (test "a point makes the crowd cheer, and the cheer ebbs each frame"
-    (let (scored (point (assoc (init 200 60 7) :ls 0 :rs 0) :left 200 -1))
+    (let (scored (point (assoc (init 200 60 7) :ls 0 :rs 0) :left 200))
       (is (> (get scored :cheer) 0))
       (is (< (get (step scored) :cheer) (get scored :cheer)))))
   ; hype tracks the ball's pace (baseline × game-difficulty), so faster ⇒ wilder
@@ -530,7 +538,7 @@
   (test "a destroyed paddle repairs after *paddle-broke-frames*, not on a score"
     (let (broke (assoc (init 400 120 7) :r-dmg *paddle-hits-max* :r-broke *paddle-broke-frames*)
           ; a score never heals it
-          scored (point (assoc broke :ls 0 :rs 0) :left 400 -1)
+          scored (point (assoc broke :ls 0 :rs 0) :left 400)
           ; but the timer running out does
           healed (reduce (fn (s _) (step-broke s)) broke (range *paddle-broke-frames*)))
       (is (paddle-broken? scored :right))
@@ -570,9 +578,17 @@
     (let (out (step-court-event (assoc (init 400 120 7) :event {:kind :quake :life 1})))
       (is (nil? (get out :event)))))
   (test "GRAVITY drags the ball downward"
-    (is (> (get (step (assoc (init 400 120 7) :event {:kind :gravity :life 99} :vy 0)) :vy) 0)))
+    ; :countdown 0 ⇒ past the pre-serve spin, ball in live play
+    (is (> (get (step (assoc (init 400 120 7) :event {:kind :gravity :life 99} :vy 0 :countdown 0))
+             :vy)
+          0)))
   (test "SLOW-MO moves the ball less than its speed"
-    (let (out (step (assoc (init 400 120 7) :event {:kind :slowmo :life 99} :vx 2 :vy 0 :bx 100)))
+    (let (out (step (assoc (init 400 120 7)
+                      :event {:kind :slowmo :life 99}
+                      :vx 2
+                      :vy 0
+                      :bx 100
+                      :countdown 0)))
       (is (< (- (get out :bx) 100) 2))))
   (test "TINY shrinks the paddles"
     (is (< (side-ph (assoc (init 400 120 7) :event {:kind :tiny :life 99}) :left 100)

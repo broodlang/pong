@@ -2633,27 +2633,37 @@ the ball over `*charge-glow-frames*` — the visible kick of a loaded hit."
           [:rect top (+ left w -1) 1 h {:bg col}]]))))
 
 (defn spinner-ops (st)
-  "The pre-serve SPINNER: a needle whirling through the parked ball at `:spin-angle`,
-drawn as a bar of cells (brightest at the hub, fading to the tips) with the horizontal
-step widened ×2 so it reads round on the tall-celled grid. Nil once released."
+  "The pre-serve SPINNER: a faint dotted RING around the parked ball with a bright
+BALL orbiting it at `:spin-angle` (x widened ×2 so the circle reads round on the
+tall-celled grid). The orbiting ball whirls while the count runs and stops on
+release, its resting side deciding the serve. Nil once released."
   (if (<= (get st :countdown) 0)
     nil
     (let (cx (+ (get st :bx) (/ *ball-w* 2))
           cy (+ (get st :by) (/ *ball-h* 2))
           ang (get st :spin-angle)
-          dx (* (cos ang) 2)
-          dy (sin ang)
-          len 8
-          hue (mod (+ (get st :hue) 40) 360))
-      (map (fn (k)
-             (let (d (- k len)
-                   v (max 0.35 (- 1 (/ (abs d) (+ len 1)))))
-               [:rect (round (+ cy (* d dy)))
-                 (round (+ cx (* d dx)))
-                 2
-                 1
-                 {:bg (hsv->rgb hue 0.7 v)}]))
-        (range (+ (* 2 len) 1))))))
+          r 8
+          hue (mod (+ (get st :hue) 40) 360)
+          ; the ring: dots sampled evenly around the circumference
+          ring (map (fn (i)
+                      (let (a (* (/ i 32.0) 2 pi)
+                            x (round (+ cx (* r 2 (cos a))))
+                            y (round (+ cy (* r (sin a)))))
+                        [:rect y x 1 1 {:bg (hsv->rgb hue 0.5 0.35)}]))
+                 (range 32))
+          ; the orbiting ball riding the ring, with a short fading tail behind it
+          orbit (map (fn (k)
+                       (let (a (- ang (* k 0.4))
+                             sz (- 3 k)
+                             x (round (+ cx (* r 2 (cos a))))
+                             y (round (+ cy (* r (sin a)))))
+                         [:rect (- y (quot sz 2))
+                           (- x sz)
+                           (* 2 sz)
+                           sz
+                           {:bg (hsv->rgb hue 0.85 (- 1.0 (* k 0.22)))}]))
+                  (range 3)))
+      (concat ring orbit))))
 
 (defn countdown-ops (st cols rows)
   "The pre-serve COUNTDOWN readout: the seconds-remaining digit, big and centred above

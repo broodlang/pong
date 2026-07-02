@@ -388,9 +388,15 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; Players can SHOOT each other. Each side carries a GUN (pistol / SMG / shotgun)
 ;; with its own fire rate, pellet count, spread and magazine. The AMMO power-up
 ;; tops up the current gun; grabbing a GUN power-up swaps the gun AND replaces the
-;; ammo. A hit CRACKS the enemy paddle; a second BREAKS it (repaired on a point).
-;; The AI only shoots when the opponent is committed to a save (can't dodge), so
-;; the idle paddle dodges loose fire.
+;; ammo. Hits CRACK the enemy paddle incrementally — `*paddle-hits-max*` of them
+;; (crack → deeper crack → DESTROYED) — and a destroyed paddle can't block and is
+;; frozen (unmovable) in place, staying visibly BROKEN for `*paddle-broke-frames*`
+;; before it self-repairs (a score never repairs it). The AI only shoots when the
+;; opponent is committed to a save (can't dodge), so the idle paddle dodges loose fire.
+; shots to DESTROY a paddle: 1st & 2nd crack, the 3rd breaks it
+(def *paddle-hits-max* 3)
+; frames a destroyed paddle stays broken + unmovable before repairing (~3 s)
+(def *paddle-broke-frames* 180)
 ;; Each gun: :cooldown (frames between shots), :pellets per shot, :spread (pellet
 ;; fan, fraction of paddle height), :jitter (aim noise), :mag (shots per pickup).
 (def *guns*
@@ -633,6 +639,11 @@ dead, capped at `*part-max*`. Pure."
 selector shared by the load / loading / effect accessors."
   (if (= side :left) left-key right-key))
 
+(defn paddle-broken? (st side)
+  "Is `side`'s paddle DESTROYED — `*paddle-hits-max*` shots taken? A broken paddle
+can't block the ball, is frozen (unmovable), and shows no load bar until it repairs."
+  (>= (get st (side-key side :l-dmg :r-dmg)) *paddle-hits-max*))
+
 (defn side-fx (st side)
   "The list of active effects on `side` (`:left`/`:right`) — each `{:kind :life}`."
   (get st (side-key side :l-fx :r-fx)))
@@ -858,17 +869,20 @@ feels), clamped on court."
     (clamp (+ paddle-top (* dir (side-speed st side *human-speed*))) 0 (- rows ph))))
 
 (defn side-loading? (st side defend ph paddle-top rows)
-  "Does `side` want to LOAD its paddle this frame? A HUMAN loads while its load key
-is held (`:l-loading`/`:r-loading`); an AI loads only while it's DEFENDING and
-already sitting within `*ai-load-window*` of the ball's predicted arrival — so the
-load slow-down never costs it a save, but the return still comes back hot."
-  (if (= (get st (side-key side :l-ctrl :r-ctrl)) :human)
-    (get st (side-key side :l-loading :r-loading))
-    (and defend
-      (let (bias (get st (side-key side :le :re))
-            target (+ (predict-center st side rows) bias)
-            pc (+ paddle-top (/ ph 2)))
-        (< (abs (- target pc)) (* ph *ai-load-window*))))))
+  "Does `side` want to LOAD its paddle this frame? Never while it's DESTROYED (it
+can't hit). Otherwise a HUMAN loads while its load key is held (`:l-loading`/
+`:r-loading`); an AI loads only while it's DEFENDING and already sitting within
+`*ai-load-window*` of the ball's predicted arrival — so the load slow-down never
+costs it a save, but the return still comes back hot."
+  (cond
+    (paddle-broken? st side) false
+    (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (get st
+                                                          (side-key side :l-loading :r-loading))
+    :else (and defend
+            (let (bias (get st (side-key side :le :re))
+                  target (+ (predict-center st side rows) bias)
+                  pc (+ paddle-top (/ ph 2)))
+              (< (abs (- target pc)) (* ph *ai-load-window*))))))
 
 (defn load-step (cur loading?)
   "Advance a paddle's load one frame: build toward 1 by `*load-rate*` while
@@ -890,9 +904,9 @@ slows its move; see `side-speed`) and re-rolls the AI aim bias periodically."
         ; ball heading left ⇒ the left paddle must defend
         l-defend (< vx 0)
         r-defend (> vx 0)
-        ;; a paddle a streaker splatted is FROZEN — it holds position until it thaws
-        l-frozen (> (get st0 :l-frozen) 0)
-        r-frozen (> (get st0 :r-frozen) 0)
+        ;; a streaker-splatted OR destroyed paddle is FROZEN — it holds position
+        l-frozen (or (> (get st0 :l-frozen) 0) (paddle-broken? st0 :left))
+        r-frozen (or (> (get st0 :r-frozen) 0) (paddle-broken? st0 :right))
         l-human (= (get st0 :l-ctrl) :human)
         r-human (= (get st0 :r-ctrl) :human)
         ;; charge/drain LOAD first, then move (movement reads it via `side-speed`)
@@ -1089,13 +1103,13 @@ and `score` turns it into a point."
         vx (get st :vx)
         lx (left-x)
         rx (right-x cols)
-        ;; a BROKEN paddle (shot twice) can't block — the ball sails through it
-        hit-left? (and (< (get st :l-dmg) 2)
+        ;; a DESTROYED paddle can't block — the ball sails through the rubble
+        hit-left? (and (not (paddle-broken? st :left))
                     (< vx 0)
                     (<= bx (+ lx *paddle-w*))
                     (>= bx lx)
                     (overlap? by (get st :lp) lph))
-        hit-right? (and (< (get st :r-dmg) 2)
+        hit-right? (and (not (paddle-broken? st :right))
                      (> vx 0)
                      (>= (+ bx *ball-w*) rx)
                      (<= (+ bx *ball-w*) (+ rx *paddle-w*))
@@ -1114,11 +1128,12 @@ and `score` turns it into a point."
 (defn point (st scorer x dir)
   "Award a point to `scorer` (`:left`/`:right`), exiting at `x`. Resets the rally,
 kicks the hue to a fresh palette, flashes the court, throws a big shake + explosion
-and announces the moment. An ordinary point repairs both paddles and re-serves
-toward `dir`. Reaching the match's `:win-score` (the menu's points-to-win) instead
-DECLARES the winner: it sets `:winner`, leaves the final score standing, BLOWS THE
-LOSER'S PADDLE APART (`dmg` 2), and freezes — `loop` then hands off to `win-loop`,
-which detonates the board + crowd finale."
+and announces the moment. Paddle damage is NOT repaired by a score (it heals on its
+own timer), so an ordinary point just re-serves toward `dir`. Reaching the match's
+`:win-score` (the menu's points-to-win) instead DECLARES the winner: it sets
+`:winner`, leaves the final score standing, SHATTERS THE LOSER'S PADDLE
+(`*paddle-hits-max*`), and freezes — `loop` then hands off to `win-loop`, which
+detonates the board + crowd finale."
   (let (ls (if (= scorer :left) (+ (get st :ls) 1) (get st :ls))
         rs (if (= scorer :right) (+ (get st :rs) 1) (get st :rs))
         win? (>= (if (= scorer :left) ls rs) (get st :win-score))
@@ -1136,10 +1151,10 @@ which detonates the board + crowd finale."
                :pop *pop-frames*
                :freeze (if win? 0 *score-freeze*)
                :winner (if win? scorer nil)
-               ;; on a WIN the loser's paddle is shattered; on an ordinary point both
-               ;; are repaired ("you get it back when you lose")
-               :l-dmg (if (and win? (= scorer :right)) 2 0)
-               :r-dmg (if (and win? (= scorer :left)) 2 0)
+               ;; a score never repairs damage (a broken paddle heals on its own
+               ;; timer); a WIN shatters the loser's paddle for the finale
+               :l-dmg (if (and win? (= scorer :right)) *paddle-hits-max* (get st :l-dmg))
+               :r-dmg (if (and win? (= scorer :left)) *paddle-hits-max* (get st :r-dmg))
                :cheer (if win? (* *cheer-frames* 2) *cheer-frames*))
         announced (announce boom text hue (if win? *win-announce-life* *announce-life*))
         n (if win? (* *score-particles* 2) *score-particles*)
@@ -1717,8 +1732,10 @@ tunnel through a narrow target like the streaker."
   (paddle-shot-box? b px *paddle-w* py ph))
 
 (defn bullet-hits (st)
-  "Advance bullets; a bullet striking the enemy paddle DAMAGES it (crack → break),
-spent/off-court ones are dropped, and a hit fires a CRACK!/SHATTER! callout."
+  "Advance bullets; a bullet striking the enemy paddle DAMAGES it a step (crack →
+deeper crack → shatter, `*paddle-hits-max*` to destroy), starting the broke/repair
+timer on the shot that destroys it; spent/off-court bullets are dropped, and a hit
+fires a CRACK!/SHATTER! callout."
   (let (cols (get st :cols)
         rows (get st :rows)
         lx (left-x)
@@ -1742,12 +1759,21 @@ spent/off-court ones are dropped, and a hit fires a CRACK!/SHATTER! callout."
                               (not (hit-r? b))
                               (not (hit-sk? b))))
                     moved)
-        dmg-l (min 2 (+ (get st :l-dmg) ndl))
-        dmg-r (min 2 (+ (get st :r-dmg) ndr))
+        dmg-l (min *paddle-hits-max* (+ (get st :l-dmg) ndl))
+        dmg-r (min *paddle-hits-max* (+ (get st :r-dmg) ndr))
+        ;; the shot that JUST destroys a paddle starts its broke/repair countdown
+        lb (if (and (>= dmg-l *paddle-hits-max*) (< (get st :l-dmg) *paddle-hits-max*))
+             *paddle-broke-frames*
+             (get st :l-broke))
+        rb (if (and (>= dmg-r *paddle-hits-max*) (< (get st :r-dmg) *paddle-hits-max*))
+             *paddle-broke-frames*
+             (get st :r-broke))
         st1 (assoc st
               :bullets survivors
               :l-dmg dmg-l
               :r-dmg dmg-r
+              :l-broke lb
+              :r-broke rb
               :streaker (if sk-shot nil sk))
         ;; a gunned-down streaker splats
         st2 (if sk-shot
@@ -1763,7 +1789,8 @@ spent/off-court ones are dropped, and a hit fires a CRACK!/SHATTER! callout."
               st1))
     (if (and (= ndl 0) (= ndr 0))
       st2
-      (let (broke (or (and (> ndl 0) (= dmg-l 2)) (and (> ndr 0) (= dmg-r 2)))
+      (let (broke (or (and (> ndl 0) (= dmg-l *paddle-hits-max*))
+                    (and (> ndr 0) (= dmg-r *paddle-hits-max*)))
             hx (if (> ndl 0) lx rx)
             hy (if (> ndl 0) (get st :lp) (get st :rp)))
         (announce (spawn-burst (assoc st2
@@ -1781,6 +1808,18 @@ spent/off-court ones are dropped, and a hit fires a CRACK!/SHATTER! callout."
 (defn step-bullets (st)
   "Both sides shoot (on cooldown, if armed), then bullets fly + resolve hits."
   (bullet-hits (side-fire (side-fire st :left) :right)))
+
+(defn step-broke (st)
+  "Tick down each DESTROYED paddle's repair timer; a paddle whose timer reaches 0
+REPAIRS back to whole (dmg 0). So a broken paddle stays down for exactly
+`*paddle-broke-frames*` — never longer, never healed early by a score."
+  (let (lb (max 0 (- (get st :l-broke) 1))
+        rb (max 0 (- (get st :r-broke) 1)))
+    (assoc st
+      :l-broke lb
+      :r-broke rb
+      :l-dmg (if (and (>= (get st :l-dmg) *paddle-hits-max*) (= lb 0)) 0 (get st :l-dmg))
+      :r-dmg (if (and (>= (get st :r-dmg) *paddle-hits-max*) (= rb 0)) 0 (get st :r-dmg)))))
 
 (defn step-frozen (st)
   "A hit-stop frame: the world is HELD (ball, paddles, particles all paused) for
@@ -1851,7 +1890,7 @@ the trail, particles, flash, crowd cheer, active effects, and floating tokens. P
                  :charge-glow (max 0 (- (get r :charge-glow) 1))
                  :announce-life (max 0 (- (get r :announce-life) 1))))
       ;; advance the cosmetic + event subsystems (each takes + returns the world)
-      (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged))))))))))))
+      (step-broke (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged)))))))))))))
 
 ;; ---- the initial world ----
 (defn init (cols rows s & opts)
@@ -1921,6 +1960,8 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :r-ammo 0
        :l-dmg 0
        :r-dmg 0
+       :l-broke 0
+       :r-broke 0
        :bullets nil
        :l-fire *fire-recheck*
        :r-fire *fire-recheck*
@@ -2325,18 +2366,33 @@ side's top-right — each counting its remaining time down."
     (concat (badge (gun-of st :left) (get st :l-ammo) (left-x) 1)
       (badge (gun-of st :right) (get st :r-ammo) (- (right-x cols) 8) -1))))
 
+(defn damage-face (face dmg)
+  "The paddle fill for damage `dmg`: its normal colour when lightly cracked, dimming
+as it worsens, and dim RED rubble once DESTROYED (`*paddle-hits-max*`)."
+  (if (>= dmg *paddle-hits-max*)
+    {:bg [120 48 48]}
+    (let ([r g b] (get face :bg)
+          d (if (>= dmg 2) 0.6 1.0))
+      {:bg [(round (* r d)) (round (* g d)) (round (* b d))]})))
+
 (defn paddle-render-ops (top px ph face dmg)
-  "A paddle's draw ops given its damage: whole when intact, split by a dark CRACK
-when cracked (`dmg` 1), and GONE when broken (`dmg` 2)."
-  (cond
-    (>= dmg 2) nil
-    (= dmg 1) (let (half (quot ph 2))
-                [[:rect top px *paddle-w* (max 1 (- half 1)) face] [:rect (+ top half 1)
-                                                                     px
-                                                                     *paddle-w*
-                                                                     (max 1 (- ph half 1))
-                                                                     face]])
-    :else [[:rect top px *paddle-w* ph face]]))
+  "A paddle's draw ops for its damage: whole at 0, then splitting into more, gappier
+chunks as cracks spread (1 → 2 → …). At `*paddle-hits-max*` it's DESTROYED but stays
+VISIBLE as dim-red, x-jittered rubble (it no longer blocks) until it self-repairs."
+  (if (<= dmg 0)
+    [[:rect top px *paddle-w* ph face]]
+    (let (broken? (>= dmg *paddle-hits-max*)
+          f (damage-face face dmg)
+          ; more damage ⇒ more chunks with a 1-cell crack between each
+          segs (+ dmg 1)
+          gap 1
+          chunk (max 1 (quot (- ph (* gap (- segs 1))) segs)))
+      (map
+        (fn (i)
+          ; rubble chunks jitter sideways a cell so a broken paddle reads as debris
+          (let (jit (if broken? (- (mod (* (+ i 1) 5) 3) 1) 0))
+            [:rect (+ top (* i (+ chunk gap))) (+ px jit) *paddle-w* chunk f]))
+        (range segs)))))
 
 (defn announce-ops (st cols rows)
   "The announcer callout: big bold centred text that PUNCHES in (a touch larger
@@ -2406,9 +2462,10 @@ with a modesty bar, and legs that pump as they stride."
 (defn load-bar-ops (st side)
   "A thin LOAD gauge riding the wall side of `side`'s paddle: a dark track with a
 fill that rises from the bottom with the paddle's charge (0..1), so a player can
-read how loaded their next shot is. Nil below a sliver so an idle paddle shows none."
+read how loaded their next shot is. Nil below a sliver, or while the paddle is
+DESTROYED (no shot to charge), so an idle or broken paddle shows none."
   (let (load (get st (side-key side :l-load :r-load)))
-    (if (<= load 0.02)
+    (if (or (<= load 0.02) (paddle-broken? st side))
       nil
       (let (rows (get st :rows)
             ph (side-ph st side rows)

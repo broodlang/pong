@@ -3,9 +3,11 @@
 MENU (`menu-loop`) where you pick a MODE — Player-vs-Player, Player-vs-AI, or
 AI-vs-AI — an AI difficulty, a GAME difficulty (ball pace + powerup flow), and the
 points to win; then the match runs. Each side is either HUMAN (moved by its
-held-key direction — left W/S + Space to shoot, right ↑/↓ + Enter to shoot) or
-AI (driven by `ai-side-top`, which tracks the ball with a CAPPED speed so a
-sharply-angled return can beat a paddle and score). The whole court is the
+held-key direction — left W/S + D to load + Space to shoot, right ↑/↓ + . to load
++ Enter to shoot) or AI (driven by `ai-side-top`, which tracks the ball with a
+CAPPED speed so a sharply-angled return can beat a paddle and score). Holding the
+LOAD key charges the paddle: it moves slower but returns the ball faster. The
+whole court is the
 window: all geometry is derived from `gui-size` in character CELLS and refit on
 `[:resize]`. One self-paced process (the window owner) draws a frame, parks in
 `(receive)` on an `(after)` frame timer that quit keys / the window X / paddle
@@ -31,6 +33,10 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *paddle-frac* 0.16)
 ; floor on paddle height (rows) so a short window still plays
 (def *paddle-min-h* 11)
+;; CEILING on paddle height as a fraction of court rows: GROW/GIANT scale the paddle
+;; MULTIPLICATIVELY, so on a large court a stacked buff turns the paddle into a wall.
+;; This clamps the effective height so a size buff stays punchy without being extreme.
+(def *paddle-max-frac* 0.4)
 ; max rows the DEFENDING paddle moves per frame (capped ⇒ beatable, but quick)
 (def *paddle-speed* 1.5)
 ; rows/frame the idle paddle drifts back to centre (recovers fast ⇒ competitive)
@@ -41,20 +47,38 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *ball-h* 3)
 ; horizontal ball speed (columns/frame) — slower ⇒ long competitive rallies (< *paddle-w*)
 (def *ball-vx* 2.7)
-;; CHARGED SHOT: a player can charge and release ON contact for extra pace — but
-;; the timing window is tiny, so each hit only nails it `*charge-chance*` of the
-;; time. A charged hit multiplies the ball's speed (capped under `*paddle-w*` so
-;; it can't tunnel); a normal hit keeps `*momentum-keep*` of the ball's current
-;; excess pace, so a fast ball STAYS fast for a while before easing back to base.
-; odds a player times the charge release right
-(def *charge-chance* 0.05)
-; ×speed on a charged hit
-(def *charge-boost* 1.45)
+;; ESCALATION: the ball carries a rising BASELINE pace (`:base-vx`, starting at
+;; `*ball-vx*`, +`*hit-speedup*` per paddle hit up to the `*charge-max*` ceiling,
+;; reset on a serve). Each hit BLEEDS the ball's current pace toward that baseline,
+;; keeping `*momentum-keep*` of the excess — so a fast ball STAYS fast and eases
+;; back down, but toward a floor that climbs a little every hit (< `*paddle-w*` so
+;; it can't tunnel a paddle).
+; baseline pace added on every paddle hit — the rally's floor keeps rising
+(def *hit-speedup* 0.12)
+; fraction of the over-baseline pace a hit retains (momentum bleed toward baseline)
+(def *momentum-keep* 0.75)
+;; LOADING: instead of a random timing window, a player HOLDS a load key to charge
+;; their paddle (`:l-load`/`:r-load`, 0..1). While loading the paddle moves SLOWER
+;; (down to a `*load-slow*` cut at full load), and the loaded hit sends the ball
+;; back FASTER — up to `*load-boost*`× at full charge (still capped at `*charge-max*`
+;; so it can't tunnel). The AI loads too (`side-loading?`): it charges whenever it's
+;; defending and already sitting on the ball's arrival, so the slow-down costs it
+;; nothing. Discharges to 0 on contact — a loaded hit is a one-shot.
+; load gained per frame while the load key is held (~0.75 s to full)
+(def *load-rate* 0.022)
+; load lost per frame when NOT loading (drains faster than it builds)
+(def *load-decay* 0.06)
+; fraction of a paddle's move speed REMOVED at full load (0.7 ⇒ crawls at 30%)
+(def *load-slow* 0.7)
+; ×ball-speed on a FULL-load hit (interpolated down to 1× at zero load)
+(def *load-boost* 1.7)
+; a hit at/above this load counts as LOADED: fires the glow + LOADED! callout
+(def *load-hit-min* 0.25)
+; how near (fraction of paddle height) the ball's arrival an AI must sit to load
+(def *ai-load-window* 0.35)
 ; speed ceiling (< *paddle-w* 5, so no tunnelling)
 (def *charge-max* 4.6)
-; fraction of the over-base speed a normal hit retains
-(def *momentum-keep* 0.75)
-; frames the charged-shot graphic (an expanding energy ring on the ball) plays
+; frames the loaded-shot graphic (an expanding energy ring on the ball) plays
 (def *charge-glow-frames* 16)
 ; max |vy| (rows/frame) at serve — the random launch angle
 (def *serve-vy* 0.9)
@@ -604,9 +628,14 @@ dead, capped at `*part-max*`. Pure."
         ps))))
 
 ;; ---- active power-up effects (per side) ----
+(defn side-key (side left-key right-key)
+  "Pick `left-key` or `right-key` by `side` (`:left`/`:right`) — the per-side field
+selector shared by the load / loading / effect accessors."
+  (if (= side :left) left-key right-key))
+
 (defn side-fx (st side)
   "The list of active effects on `side` (`:left`/`:right`) — each `{:kind :life}`."
-  (if (= side :left) (get st :l-fx) (get st :r-fx)))
+  (get st (side-key side :l-fx :r-fx)))
 
 (defn effect-factor (fx kind val)
   "Multiply `val` into the result once per active effect of `:kind` in `fx` (1.0 if
@@ -616,24 +645,29 @@ none) — how GROW/SHRINK and SPEED/SLOW stack into a single multiplier."
 (defn side-ph (st side rows)
   "Effective paddle height for `side`: the base `paddle-h` scaled by any active
 height effects (GROW/GIANT taller, SHRINK/MINI shorter) and the TINY court event,
-floored at `*paddle-min-h*`."
+floored at `*paddle-min-h*` and — so a size buff can't wall off a large court —
+capped at `*paddle-max-frac*` of the court (the cap never bites below the floor)."
   (let (fx (side-fx st side)
         tiny (if (= (event-kind st) :tiny) *event-tiny* 1)
         m (* (effect-factor fx :grow *fx-grow*)
             (effect-factor fx :giant *fx-giant*)
             (effect-factor fx :shrink *fx-shrink*)
             (effect-factor fx :mini *fx-mini*)
-            tiny))
-    (max *paddle-min-h* (round (* (paddle-h rows) m)))))
+            tiny)
+        cap (max *paddle-min-h* (round (* rows *paddle-max-frac*))))
+    (max *paddle-min-h* (min cap (round (* (paddle-h rows) m))))))
 
 (defn side-speed (st side base)
   "Paddle move-`base` for `side`, scaled by any speed effects (SPEED/TURBO faster,
-SLOW/FREEZE slower) AND by the crowd: while the stand is cheering the players are
-fired up and move up to `*cheer-speed-boost*`× faster (fading with the cheer)."
+SLOW/FREEZE slower), by the paddle's LOAD (a loaded paddle drags, down to a
+`*load-slow*` cut at full charge), AND by the crowd: while the stand is cheering
+the players are fired up and move up to `*cheer-speed-boost*`× faster."
   (let (fx (side-fx st side)
+        load (get st (side-key side :l-load :r-load))
         cheer-mult (+ 1 (* (/ (get st :cheer) (max 1 *cheer-frames*)) *cheer-speed-boost*)))
     (* base
       cheer-mult
+      (- 1 (* load *load-slow*))
       (effect-factor fx :speed *fx-fast*)
       (effect-factor fx :turbo *fx-turbo*)
       (effect-factor fx :slow *fx-slow*)
@@ -652,7 +686,8 @@ so the tint sums up what's on it."
   (let (fx (side-fx st side))
     (if (= 0 (count fx))
       base
-      (blend-rgbs (cons base (map (fn (e) (hsv->rgb (if (get e :good?) *good-hue* *bad-hue*) 0.85 1.0)) fx))))))
+      (blend-rgbs (cons base
+                    (map (fn (e) (hsv->rgb (if (get e :good?) *good-hue* *bad-hue*) 0.85 1.0)) fx))))))
 
 ;; ---- the AI players ----
 (defn ai-track (paddle-top target-center rows ph speed)
@@ -746,6 +781,8 @@ shallow angle, threading the PRNG seed in `st`. Used at kick-off and after a poi
       :vy vy
       :owner nil
       :in-crowd false
+      ; fresh serve resets the rising baseline pace back to base
+      :base-vx *ball-vx*
       ; fresh serve: nobody has hit the ball yet, so no powerup pickups
       :s s1)))
 
@@ -820,10 +857,31 @@ feels), clamped on court."
   (let (dir (if (= side :left) (get st :l-dir) (get st :r-dir)))
     (clamp (+ paddle-top (* dir (side-speed st side *human-speed*))) 0 (- rows ph))))
 
+(defn side-loading? (st side defend ph paddle-top rows)
+  "Does `side` want to LOAD its paddle this frame? A HUMAN loads while its load key
+is held (`:l-loading`/`:r-loading`); an AI loads only while it's DEFENDING and
+already sitting within `*ai-load-window*` of the ball's predicted arrival — so the
+load slow-down never costs it a save, but the return still comes back hot."
+  (if (= (get st (side-key side :l-ctrl :r-ctrl)) :human)
+    (get st (side-key side :l-loading :r-loading))
+    (and defend
+      (let (bias (get st (side-key side :le :re))
+            target (+ (predict-center st side rows) bias)
+            pc (+ paddle-top (/ ph 2)))
+        (< (abs (- target pc)) (* ph *ai-load-window*))))))
+
+(defn load-step (cur loading?)
+  "Advance a paddle's load one frame: build toward 1 by `*load-rate*` while
+`loading?`, else drain toward 0 by `*load-decay*`."
+  (if loading?
+    (min 1.0 (+ cur *load-rate*))
+    (max 0.0 (- cur *load-decay*))))
+
 (defn move-ai (st)
   "Advance both paddles one frame. Each side is moved by `human-side-top` or
 `ai-side-top` per its controller, except a paddle a streaker splatted is FROZEN
-(it holds position until it thaws). Re-rolls the AI aim bias periodically."
+(it holds position until it thaws). Also builds/drains each paddle's LOAD (which
+slows its move; see `side-speed`) and re-rolls the AI aim bias periodically."
   (let (st0 (if (= 0 (mod (get st :t) *aim-period*)) (reroll-aim st) st)
         rows (get st0 :rows)
         lph (side-ph st0 :left rows)
@@ -836,19 +894,25 @@ feels), clamped on court."
         l-frozen (> (get st0 :l-frozen) 0)
         r-frozen (> (get st0 :r-frozen) 0)
         l-human (= (get st0 :l-ctrl) :human)
-        r-human (= (get st0 :r-ctrl) :human))
-    (assoc st0
-      :t (+ (get st0 :t) 1)
-      :l-frozen (max 0 (- (get st0 :l-frozen) 1))
-      :r-frozen (max 0 (- (get st0 :r-frozen) 1))
+        r-human (= (get st0 :r-ctrl) :human)
+        ;; charge/drain LOAD first, then move (movement reads it via `side-speed`)
+        st1 (assoc st0
+              :l-load (load-step (get st0 :l-load)
+                        (side-loading? st0 :left l-defend lph (get st0 :lp) rows))
+              :r-load (load-step (get st0 :r-load)
+                        (side-loading? st0 :right r-defend rph (get st0 :rp) rows))))
+    (assoc st1
+      :t (+ (get st1 :t) 1)
+      :l-frozen (max 0 (- (get st1 :l-frozen) 1))
+      :r-frozen (max 0 (- (get st1 :r-frozen) 1))
       :lp (cond
-            l-frozen (get st0 :lp)
-            l-human (human-side-top st0 :left lph (get st0 :lp) rows)
-            :else (ai-side-top st0 :left lph (get st0 :lp) rows l-defend))
+            l-frozen (get st1 :lp)
+            l-human (human-side-top st1 :left lph (get st1 :lp) rows)
+            :else (ai-side-top st1 :left lph (get st1 :lp) rows l-defend))
       :rp (cond
-            r-frozen (get st0 :rp)
-            r-human (human-side-top st0 :right rph (get st0 :rp) rows)
-            :else (ai-side-top st0 :right rph (get st0 :rp) rows r-defend)))))
+            r-frozen (get st1 :rp)
+            r-human (human-side-top st1 :right rph (get st1 :rp) rows)
+            :else (ai-side-top st1 :right rph (get st1 :rp) rows r-defend)))))
 
 (defn overlap? (by paddle-top ph)
   "Does the ball (top `by`, height `*ball-h*`) vertically overlap a paddle
@@ -962,32 +1026,40 @@ its new `vy` from where it struck (`english`)."
     :vx (* (if (< (get st :vx) 0) 1 -1) speed)
     :vy (english (get st :by) paddle-top ph)))
 
-(defn return-speed-for (cur charged?)
-  "The outgoing ball speed for a hit on a ball currently moving at `|vx| = cur`:
-a CHARGED hit multiplies the pace (capped at `*charge-max*`); a normal hit keeps
-`*momentum-keep*` of the excess over base, so pace bleeds back toward `*ball-vx*`."
-  (if charged?
-    (min *charge-max* (* (max cur *ball-vx*) *charge-boost*))
-    (+ *ball-vx* (* (- cur *ball-vx*) *momentum-keep*))))
+(defn return-speed-for (cur load base)
+  "The outgoing ball speed for a hit on a ball moving at `|vx| = cur` off a paddle
+carrying `load` (0..1), bled toward the rally's rising `base`line: momentum keeps
+`*momentum-keep*` of the pace OVER `base`, then the load multiplies it up to
+`*load-boost*`× at full charge — all capped at `*charge-max*` (< `*paddle-w*` so a
+fast/loaded ball can't tunnel a paddle)."
+  (min *charge-max*
+    (* (+ base (* (- (max cur base) base) *momentum-keep*))
+      (+ 1 (* load (- *load-boost* 1))))))
 
 (defn paddle-hit (st new-bx paddle-top ph x by)
-  "Resolve a paddle hit at face `x`: roll the tiny CHARGE window (per player), set
-the return pace (charged ⇒ faster, else momentum bleeds toward base), deflect,
-bump the RALLY counter, fire callouts, and `contact` with intensity that BUILDS
-with the rally. A charged hit gets its own louder callout + shake."
-  (let (r (+ (get st :rally) 1)
-        [roll s1] (rand-float (get st :s))
-        charged? (< roll *charge-chance*)
-        speed (return-speed-for (abs (get st :vx)) charged?)
+  "Resolve a paddle hit at face `x`: read the hitting paddle's (`:owner`) LOAD, set
+the return pace (each hit adds `*hit-speedup*`; the load multiplies it up), DISCHARGE
+that paddle's load to 0, deflect, bump the RALLY counter, fire callouts, and
+`contact` with intensity that BUILDS with the rally. A loaded hit (`*load-hit-min*`+)
+gets its own louder callout + shake + the charge glow."
+  (let (loadk (side-key (get st :owner) :l-load :r-load)
+        load (get st loadk)
+        loaded? (>= load *load-hit-min*)
+        r (+ (get st :rally) 1)
+        ; bump the rally's rising baseline (capped), then bleed the pace toward it
+        base (min *charge-max* (+ (get st :base-vx) *hit-speedup*))
+        speed (return-speed-for (abs (get st :vx)) load base)
         n (min *part-max* (+ *hit-particles* (* r *rally-particle-step*)))
-        shake (+ *hit-shake* (min *rally-shake-cap* (* r *rally-shake-step*)) (if charged? 3 0))
+        shake (+ *hit-shake* (min *rally-shake-cap* (* r *rally-shake-step*)) (if loaded? 3 0))
         ;; `:rally` is the live SHOT COUNT of this rally — bumped on every paddle hit;
-        ;; a charged hit also lights the `:charge-glow` graphic on the ball
-        deflected (assoc (deflect (assoc st :s s1) new-bx paddle-top ph speed)
+        ;; the hit spends the paddle's load (→ 0) and a loaded one lights the `:charge-glow`
+        deflected (assoc (deflect st new-bx paddle-top ph speed)
                     :rally r
-                    :charge-glow (if charged? *charge-glow-frames* (get st :charge-glow)))
-        announced (if charged?
-                    (announce deflected "CHARGED!" (get deflected :hue) *announce-life*)
+                    :base-vx base
+                    loadk 0
+                    :charge-glow (if loaded? *charge-glow-frames* (get st :charge-glow)))
+        announced (if loaded?
+                    (announce deflected "LOADED!" (get deflected :hue) *announce-life*)
                     (rally-announce deflected r))
         hit (contact announced
               x
@@ -1210,13 +1282,15 @@ item-free game), 1 is the base flow, 2 packs the court (insane mode)."
 
 (defn age-effects (st)
   "Tick down both sides' active effects, dropping any that have expired."
-  (let (age (fn (fx) (filter (fn (e) (> (get e :life) 0)) (map (fn (e) (assoc e :life (- (get e :life) 1))) fx))))
+  (let (age (fn (fx)
+              (filter (fn (e) (> (get e :life) 0))
+                (map (fn (e) (assoc e :life (- (get e :life) 1))) fx))))
     (assoc st :l-fx (age (get st :l-fx)) :r-fx (age (get st :r-fx)))))
 
 ;; ---- wind ----
 (defn clamp-vx (vx)
   "Keep the ball's horizontal speed in a safe band (sign preserved): fast enough to
-keep crossing, up to `*charge-max*` (a charged shot's pace) which stays under
+keep crossing, up to `*charge-max*` (a full-load shot's pace) which stays under
 `*paddle-w*` so it can never tunnel through a paddle."
   (* (if (< vx 0) -1 1) (clamp (abs vx) (* 0.6 *ball-vx*) *charge-max*)))
 
@@ -1237,7 +1311,13 @@ every target is a violent `*storm-max*` gale. Threads the PRNG."
                                    storm? *storm-max*
                                    (< p *wind-still-chance*) *wind-still*
                                    :else *wind-max*))
-                         [(assoc st :wind-tx (* (- (* 2 a) 1) mag) :wind-ty (* (- (* 2 b) 1) mag) :s s3) (if storm? (quot *wind-period* 2) *wind-period*)]))
+                         [(assoc st
+                            :wind-tx (* (- (* 2 a) 1) mag)
+                            :wind-ty (* (- (* 2 b) 1) mag)
+                            :s s3) (if storm?
+                                                                                                                                                                                               (quot *wind-period*
+                                                                                                                                                                                                 2)
+                                                                                                                                                                                               *wind-period*)]))
         ease (fn (cur tgt) (+ cur (* *wind-ease* (- tgt cur)))))
     (assoc st1
       :wind-x (ease (get st1 :wind-x) (get st1 :wind-tx))
@@ -1504,7 +1584,8 @@ PRNG. Tail-recursive; returns `[signs s']`."
   "Age the held-up placards (dropping any whose ~10 s elapsed). While a batch is
 up, hold the gap timer; once they've all dropped, count the short gap down and
 pop a fresh batch."
-  (let (alive (filter (fn (sg) (> (get sg :life) 0)) (map (fn (sg) (assoc sg :life (- (get sg :life) 1))) (get st :signs))))
+  (let (alive (filter (fn (sg) (> (get sg :life) 0))
+                (map (fn (sg) (assoc sg :life (- (get sg :life) 1))) (get st :signs))))
     (if (> (count alive) 0)
       (assoc st :signs alive :sign-timer *sign-gap*)
       (let (timer (- (get st :sign-timer) 1))
@@ -1718,7 +1799,9 @@ reads during the pause."
 (walls, paddles, powerup pickups, a point). `step` calls this `n` times a frame so a
 fast (high game-difficulty) ball covers more ground without any single move
 exceeding a paddle's width and tunnelling straight through it."
-  (let (moved (assoc st :bx (+ (get st :bx) (* (get st :vx) perstep)) :by (+ (get st :by) (* (get st :vy) perstep))))
+  (let (moved (assoc st
+                :bx (+ (get st :bx) (* (get st :vx) perstep))
+                :by (+ (get st :by) (* (get st :vy) perstep))))
     (score (collect-powerups (bounce-paddles (bounce-walls moved))))))
 
 (defn step (st)
@@ -1802,6 +1885,10 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :r-dir 0
        :l-shoot false
        :r-shoot false
+       :l-load 0
+       :r-load 0
+       :l-loading false
+       :r-loading false
        :ai-speed-mult (get diff :ai-speed-mult)
        :ai-return-mult (get diff :ai-return-mult)
        :ai-aim-mult (get diff :ai-aim-mult)
@@ -1920,7 +2007,16 @@ net mesh filling each mouth, with bright posts framing it top and bottom."
 dimmer and more saturated the older it is, oldest first so the ball paints over
 its own freshest trail."
   (let (n (count trail))
-    (reverse (first (reduce (fn ([ops i] t) (let (f (- 1 (/ i (max 1 n))) op [:rect (floor (get t :y)) (floor (get t :x)) *ball-w* *ball-h* {:bg (hsv->rgb (get t :hue) 0.85 (* 0.55 f f))}]) [(cons op ops) (+ i 1)])) [nil 0] trail)))))
+    (reverse (first (reduce (fn ([ops i] t)
+                              (let (f (- 1 (/ i (max 1 n)))
+                                    op [:rect (floor (get t :y))
+                                         (floor (get t :x))
+                                         *ball-w*
+                                         *ball-h*
+                                         {:bg (hsv->rgb (get t :hue) 0.85 (* 0.55 f f))}])
+                                [(cons op ops) (+ i 1)]))
+                      [nil 0]
+                      trail)))))
 
 (defn particle-ops (ps)
   "Every live explosion particle as a small 2×1 block, its hue fixed at birth and
@@ -2092,7 +2188,11 @@ while its beam reaches its target — a faint green tractor beam down into the s
             light-l [:rect (+ uy 1) (+ x 1) 1 1 {:bg blink}]
             light-r [:rect (+ uy 1) (+ x (- *ufo-w* 2)) 1 1 {:bg blink}]
             beam (if beam?
-                   [[:rect (+ uy 2) (- (get ufo :target) 1) 3 (- (+ rows *crowd-rows*) (+ uy 2)) {:bg (hsv->rgb 130 0.85 0.32)}]]
+                   [[:rect (+ uy 2)
+                      (- (get ufo :target) 1)
+                      3
+                      (- (+ rows *crowd-rows*) (+ uy 2))
+                      {:bg (hsv->rgb 130 0.85 0.32)}]]
                    nil))
         (concat [dome body light-l light-r] beam)))))
 
@@ -2190,7 +2290,10 @@ effect's `:life` runs down — so you can see what's active and for how much lon
 
 (defn side-fx-ops (effs x0)
   "Stack a side's active-effect badges down from the top edge at column `x0`."
-  (first (reduce (fn ([ops row] eff) [(concat ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)]) [nil *fx-badge-top*] effs)))
+  (first (reduce (fn ([ops row] eff)
+                   [(concat ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)])
+           [nil *fx-badge-top*]
+           effs)))
 
 (defn effect-indicator-ops (st cols)
   "Active-effect badges in the top corners — left side's effects top-left, right
@@ -2209,7 +2312,13 @@ side's top-right — each counting its remaining time down."
 (bright yellow when armed, dim when empty), and a row of pips run inward."
   (let (badge (fn (gun n x pip-dir)
                 (let (col (if (> n 0) [255 232 110] [96 96 116]))
-                  (concat [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1 (+ x 4) (str n) {:scale 4 :fg col :bold true}]]
+                  (concat [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1
+                                                                                                       (+ x
+                                                                                                         4)
+                                                                                                       (str n)
+                                                                                                       {:scale 4
+                                                                                                        :fg col
+                                                                                                        :bold true}]]
                     ;; pips trailing inward, one per shot (capped so they don't run on)
                     (map (fn (i) [:rect 5 (+ x (* pip-dir (* (+ i 1) 3))) 2 1 {:bg col}])
                       (range (min n 14)))))))
@@ -2222,7 +2331,11 @@ when cracked (`dmg` 1), and GONE when broken (`dmg` 2)."
   (cond
     (>= dmg 2) nil
     (= dmg 1) (let (half (quot ph 2))
-                [[:rect top px *paddle-w* (max 1 (- half 1)) face] [:rect (+ top half 1) px *paddle-w* (max 1 (- ph half 1)) face]])
+                [[:rect top px *paddle-w* (max 1 (- half 1)) face] [:rect (+ top half 1)
+                                                                     px
+                                                                     *paddle-w*
+                                                                     (max 1 (- ph half 1))
+                                                                     face]])
     :else [[:rect top px *paddle-w* ph face]]))
 
 (defn announce-ops (st cols rows)
@@ -2290,9 +2403,25 @@ with a modesty bar, and legs that pump as they stride."
             leg-r [:rect (+ y 3) (+ x (- *streaker-w* 1) (- 0 stride)) 1 2 {:bg skin}])
         [head body censor leg-l leg-r]))))
 
+(defn load-bar-ops (st side)
+  "A thin LOAD gauge riding the wall side of `side`'s paddle: a dark track with a
+fill that rises from the bottom with the paddle's charge (0..1), so a player can
+read how loaded their next shot is. Nil below a sliver so an idle paddle shows none."
+  (let (load (get st (side-key side :l-load :r-load)))
+    (if (<= load 0.02)
+      nil
+      (let (rows (get st :rows)
+            ph (side-ph st side rows)
+            ptop (floor (get st (side-key side :lp :rp)))
+            col (if (= side :left) (- (left-x) 3) (+ (right-x (get st :cols)) *paddle-w* 2))
+            fill (max 1 (round (* ph load)))
+            top (+ ptop (- ph fill))
+            c (hsv->rgb (mod (+ (get st :hue) 40) 360) 0.75 1.0))
+        [[:rect ptop col 1 ph {:bg [40 44 60]}] [:rect top col 1 fill {:bg c}]]))))
+
 (defn charge-aura-ops (st)
   "The CHARGED-shot graphic: a bright energy ring that expands and fades out from
-the ball over `*charge-glow-frames*` — the visible kick of a perfectly-timed hit."
+the ball over `*charge-glow-frames*` — the visible kick of a loaded hit."
   (let (g (get st :charge-glow))
     (if (= g 0)
       nil
@@ -2340,6 +2469,8 @@ ball, and the announcer — all shifted by the current screen-shake offset."
                 (streaker-ops st)
                 left-ops
                 right-ops
+                (load-bar-ops st :left)
+                (load-bar-ops st :right)
                 (bullet-ops st)
                 (charge-aura-ops st)
                 [(ball-op st hue)]
@@ -2378,6 +2509,13 @@ side, so a stray key can't make an AI paddle fire."
         key (if (= side :left) :l-shoot :r-shoot))
     (if (= ctrl :human) (assoc st key on) st)))
 
+(defn set-loading (st side on)
+  "Set `side`'s held LOAD intent (`:l-loading`/`:r-loading`) — HUMAN side only, so a
+stray key can't charge an AI paddle (an AI decides for itself in `side-loading?`)."
+  (let (ctrl (get st (side-key side :l-ctrl :r-ctrl))
+        key (side-key side :l-loading :r-loading))
+    (if (= ctrl :human) (assoc st key on) st)))
+
 (defn left-fire-key? (k)
   "Is `k` the LEFT player's shoot key (Space)?"
   (= k " "))
@@ -2386,10 +2524,19 @@ side, so a stray key can't make an AI paddle fire."
   "Is `k` the RIGHT player's shoot key (Enter, or `/` near the arrow keys)?"
   (or (= k :enter) (= k "/")))
 
+(defn left-load-key? (k)
+  "Is `k` the LEFT player's load key (D — held to charge the paddle)?"
+  (or (= k "d") (= k "D")))
+
+(defn right-load-key? (k)
+  "Is `k` the RIGHT player's load key (. — held to charge the paddle)?"
+  (or (= k ".") (= k ">")))
+
 (defn press-key (st k)
-  "Apply a key PRESS: left player W/S (up/down) + Space (shoot), right player ↑/↓ +
-Enter (shoot). A `:blur` (focus lost) stops both paddles and releases both triggers
-so a key held across a focus change can't stick. Anything else leaves the world be."
+  "Apply a key PRESS: left player W/S (up/down) + D (load) + Space (shoot), right
+player ↑/↓ + . (load) + Enter (shoot). A `:blur` (focus lost) stops both paddles and
+releases every trigger/load so a key held across a focus change can't stick.
+Anything else leaves the world be."
   (cond
     (or (= k "w") (= k "W")) (set-dir st :left -1)
     (or (= k "s") (= k "S")) (set-dir st :left 1)
@@ -2397,12 +2544,20 @@ so a key held across a focus change can't stick. Anything else leaves the world 
     (= k :down) (set-dir st :right 1)
     (left-fire-key? k) (set-shoot st :left true)
     (right-fire-key? k) (set-shoot st :right true)
-    (= k :blur) (assoc st :l-dir 0 :r-dir 0 :l-shoot false :r-shoot false)
+    (left-load-key? k) (set-loading st :left true)
+    (right-load-key? k) (set-loading st :right true)
+    (= k :blur) (assoc st
+                  :l-dir 0
+                  :r-dir 0
+                  :l-shoot false
+                  :r-shoot false
+                  :l-loading false
+                  :r-loading false)
     :else st))
 
 (defn release-key (st k)
   "Apply a `[:key-up k]` RELEASE: halt the paddle that key was driving, or drop the
-trigger that key was holding."
+trigger / load that key was holding."
   (cond
     (or (= k "w") (= k "W")) (clear-dir st :left -1)
     (or (= k "s") (= k "S")) (clear-dir st :left 1)
@@ -2410,6 +2565,8 @@ trigger that key was holding."
     (= k :down) (clear-dir st :right 1)
     (left-fire-key? k) (set-shoot st :left false)
     (right-fire-key? k) (set-shoot st :right false)
+    (left-load-key? k) (set-loading st :left false)
+    (right-load-key? k) (set-loading st :right false)
     :else st))
 
 (defn wait-ms (deadline)
@@ -2514,7 +2671,10 @@ draws the result via `loop`."
   (receive
     ([:resize cols rows] (loop w (refit st cols rows) deadline))
     ([:key-up k] (loop-wait w (release-key st k) deadline))
-    (m (cond (or (= m :close) (= m :ctrl-c)) (gui-close w) (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline)) :else (loop-wait w (press-key st m) deadline)))
+    (m (cond
+         (or (= m :close) (= m :ctrl-c)) (gui-close w)
+         (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
+         :else (loop-wait w (press-key st m) deadline)))
     (after (wait-ms deadline)
       (let (st2 (play-sounds! st (step st)))
         (if (get st2 :winner)
@@ -2557,7 +2717,11 @@ players' keys with who drives each side."
                                    bar (if active
                                          (let (w (+ (* (string-length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
-                                           [[:rect (- row 1) c w (+ sc 2) {:bg (hsv->rgb h2 0.6 0.25)}]])
+                                           [[:rect (- row 1)
+                                              c
+                                              w
+                                              (+ sc 2)
+                                              {:bg (hsv->rgb h2 0.6 0.25)}]])
                                          nil))
                                (concat bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts)))
@@ -2566,21 +2730,23 @@ players' keys with who drives each side."
         crow (+ py (round (* ph 0.7)))
         controls [(menu-text-op cols crow "CONTROLS" cscale [150 160 185]) (menu-text-op cols
                                                                              (+ crow clh)
-                                                                             (str "LEFT   MOVE W / S   SHOOT SPACE   "
+                                                                             (str "LEFT   MOVE W / S   LOAD D   SHOOT SPACE   "
                                                                                (pause-ctrl-tag st
                                                                                  :left))
                                                                              cscale
                                                                              [120 200 230])
                    (menu-text-op cols
                      (+ crow (* 2 clh))
-                     (str "RIGHT   MOVE UP / DOWN   SHOOT ENTER   " (pause-ctrl-tag st :right))
+                     (str "RIGHT   MOVE UP / DOWN   LOAD .   SHOOT ENTER   "
+                       (pause-ctrl-tag st :right))
                      cscale
                      [230 150 200])])
     (concat [[:rect (- py 1) (- px 1) (+ pw 2) (+ ph 2) {:bg (hsv->rgb hue 0.5 0.8)}] [:rect py
                                                                                         px
                                                                                         pw
                                                                                         ph
-                                                                                        {:bg [14 16 28]}]
+                                                                                        {:bg [14 16
+                                                                                               28]}]
               (menu-text-op cols
                 (+ py (round (* ph 0.08)))
                 "PAUSED"
@@ -2687,11 +2853,32 @@ barred + brighter)."
                                    bar (if active
                                          (let (w (+ (* (string-length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
-                                           [[:rect (- row 1) c w (+ sc 2) {:bg (hsv->rgb h2 0.6 0.25)}]])
+                                           [[:rect (- row 1)
+                                              c
+                                              w
+                                              (+ sc 2)
+                                              {:bg (hsv->rgb h2 0.6 0.25)}]])
                                          nil))
                                (concat bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts))))
-    (concat [(menu-text-op cols (round (* rows 0.28)) name (min 16 (max 2 (round (* rows 0.12)))) wcol) (menu-text-op cols (round (* rows 0.48)) (str (get st :ls) " - " (get st :rs)) (min 12 (max 2 (round (* rows 0.055)))) [240 240 255])]
+    (concat [(menu-text-op cols
+               (round (* rows 0.28))
+               name
+               (min 16 (max 2 (round (* rows 0.12))))
+               wcol) (menu-text-op cols
+                                                                                                                                                                      (round (* rows
+                                                                                                                                                                               0.48))
+                                                                                                                                                                      (str (get st
+                                                                                                                                                                             :ls)
+                                                                                                                                                                        " - "
+                                                                                                                                                                        (get st
+                                                                                                                                                                          :rs))
+                                                                                                                                                                      (min 12
+                                                                                                                                                                        (max 2
+                                                                                                                                                                          (round (* rows
+                                                                                                                                                                                   0.055))))
+                                                                                                                                                                      [240 240
+                                                                                                                                                                        255])]
       option-ops)))
 
 (defn win-render (st sel)
@@ -2705,7 +2892,9 @@ options on top."
 the cadence (while the barrage lasts), then cycle the hue, age the particles +
 flash, decay the shake, keep the crowd cheer pegged, age the seat gaps, and fade
 the announce."
-  (let (st1 (if (and (< tick *win-blast-frames*) (= 0 (mod tick *win-blast-every*))) (win-explode st) st))
+  (let (st1 (if (and (< tick *win-blast-frames*) (= 0 (mod tick *win-blast-every*)))
+              (win-explode st)
+              st))
     (assoc st1
       :hue (mod (+ (get st1 :hue) *hue-step*) 360)
       :particles (step-particles (get st1 :particles))
@@ -2944,10 +3133,22 @@ breadcrumb of the choices made, and the controls hint."
         rows (get menu :rows)
         hue (get menu :hue)
         crumb (menu-breadcrumb menu)
-        title-ops [(menu-text-op cols (round (* rows 0.1)) "BROOD PONG" (min 16 (max 2 (round (* rows 0.13)))) (hsv->rgb hue 0.45 1.0))]
-        sub-ops [(menu-text-op cols (round (* rows 0.29)) (menu-step-title (get menu :step)) (min 16 (max 2 (round (* rows 0.055)))) (hsv->rgb (+ hue 50) 0.4 0.95))]
+        title-ops [(menu-text-op cols
+                     (round (* rows 0.1))
+                     "BROOD PONG"
+                     (min 16 (max 2 (round (* rows 0.13))))
+                     (hsv->rgb hue 0.45 1.0))]
+        sub-ops [(menu-text-op cols
+                   (round (* rows 0.29))
+                   (menu-step-title (get menu :step))
+                   (min 16 (max 2 (round (* rows 0.055))))
+                   (hsv->rgb (+ hue 50) 0.4 0.95))]
         crumb-ops (if crumb
-                    [(menu-text-op cols (round (* rows 0.85)) crumb (max 1 (round (* rows 0.022))) [150 160 185])]
+                    [(menu-text-op cols
+                       (round (* rows 0.85))
+                       crumb
+                       (max 1 (round (* rows 0.022)))
+                       [150 160 185])]
                     nil)
         body-ops (cond
                    (= (get menu :step) :difficulty) (menu-stepper-ops menu
@@ -2965,7 +3166,11 @@ breadcrumb of the choices made, and the controls hint."
                                                 10
                                                 (game-descriptor (get menu :game-level)))
                    :else (menu-option-ops menu cols rows))
-        hint-ops [(menu-text-op cols (round (* rows 0.92)) "W / S  or  UP / DOWN  to choose       ENTER select       ESC quit" (max 1 (round (* rows 0.02))) [110 120 140])])
+        hint-ops [(menu-text-op cols
+                    (round (* rows 0.92))
+                    "W / S  or  UP / DOWN  to choose       ENTER select       ESC quit"
+                    (max 1 (round (* rows 0.02)))
+                    [110 120 140])])
     (into [[:clear] [:rect 0 0 cols rows {:bg [8 10 18]}]]
       (concat title-ops sub-ops body-ops crumb-ops hint-ops))))
 

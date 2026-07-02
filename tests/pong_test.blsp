@@ -187,7 +187,9 @@
   (test "a fully-loaded hit returns faster than an unloaded one (capped, no tunnelling)"
     (is (> (return-speed-for *ball-vx* 1.0 *ball-vx*) (return-speed-for *ball-vx* 0 *ball-vx*)))
     (is (<= (return-speed-for 99 1.0 *ball-vx*) *charge-max*))
-    (is (< *charge-max* *paddle-w*)))
+    ; no tunnelling now comes from sub-stepping: each collision step is short enough
+    (is (< *max-substep* *paddle-w*))
+    (is (< *bullet-speed* *charge-max*)))
   (test "load scales the return pace monotonically"
     (is (< (return-speed-for *ball-vx* 0.25 *ball-vx*) (return-speed-for *ball-vx* 0.75 *ball-vx*))))
   (test "momentum bleeds a fast ball back toward the baseline (stays fast, eases down)"
@@ -224,6 +226,28 @@
                    20
                    (get charged :by))
               :l-load))))))
+
+(describe "human paddle inertia"
+  (test "a held key accelerates: velocity ramps up frame over frame"
+    (let (st (assoc (init 200 120 7 {:mode :pve :difficulty 5 :game 5 :points 11})
+               :l-dir 1
+               :l-vel 0
+               :lp 20)
+          ph (side-ph st :left (get st :rows))
+          [t1 v1] (human-step st :left ph 20 (get st :rows))
+          [_ v2] (human-step (assoc st :l-vel v1) :left ph t1 (get st :rows)))
+      (is (> v1 0))
+      (is (> v2 v1))))
+  (test "releasing drifts: it coasts on with decaying velocity, not a dead stop"
+    (let (st (assoc (init 200 120 7 {:mode :pve :difficulty 5 :game 5 :points 11})
+               :l-dir 0
+               :l-vel 2.0
+               :lp 40)
+          ph (side-ph st :left (get st :rows))
+          [t v] (human-step st :left ph 40 (get st :rows)))
+      ; still moving (drift), but slower than before, and it advanced
+      (is (< 0 v 2.0))
+      (is (> t 40)))))
 
 (describe "paddle colour"
   (test "a clean paddle keeps its fixed base colour (no rainbow)"
@@ -386,9 +410,9 @@
       (is (> (count ops) 0))
       (is (every? (fn (o) (>= (vector-ref o 1) 0)) ops)))))
 (describe "wind"
-  ; sign preserved
-  (test "clamp-vx keeps the ball crossing but under the paddle width (no tunnelling)"
-    (is (< (abs (clamp-vx 99)) *paddle-w*))
+  ; sign preserved; capped at *charge-max* (sub-stepping, not this cap, prevents tunnelling)
+  (test "clamp-vx keeps the ball crossing, capped at the speed ceiling"
+    (is (= (abs (clamp-vx 99)) *charge-max*))
     (is (> (abs (clamp-vx 0.01)) 0))
     (is (< (clamp-vx -99) 0)))
   ; but only part-way (eased)

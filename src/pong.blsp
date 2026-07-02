@@ -59,9 +59,10 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *momentum-keep* 0.75)
 ;; LOADING: instead of a random timing window, a player HOLDS a load key to charge
 ;; their paddle (`:l-load`/`:r-load`, 0..1). While loading the paddle moves SLOWER
-;; (down to a `*load-slow*` cut at full load), and the loaded hit sends the ball
-;; back FASTER — up to `*load-boost*`× at full charge (still capped at `*charge-max*`
-;; so it can't tunnel). The AI loads too (`side-loading?`): it charges whenever it's
+;; (down to a `*load-slow*` cut at full load), and the loaded hit ROCKETS the ball
+;; back — up to `*load-boost*`× at full charge (capped at `*charge-max*`; the ball's
+;; travel is sub-stepped so even that rocket can't tunnel). A paddle charged past
+;; `*flame-load*` catches FIRE. The AI loads too (`side-loading?`): it charges when it's
 ;; defending and already sitting on the ball's arrival, so the slow-down costs it
 ;; nothing. Discharges to 0 on contact — a loaded hit is a one-shot.
 ; load gained per frame while the load key is held (~0.75 s to full)
@@ -70,14 +71,20 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *load-decay* 0.06)
 ; fraction of a paddle's move speed REMOVED at full load (0.7 ⇒ crawls at 30%)
 (def *load-slow* 0.7)
-; ×ball-speed on a FULL-load hit (interpolated down to 1× at zero load)
-(def *load-boost* 1.7)
+; ×ball-speed on a FULL-load hit (interpolated down to 1× at zero load) — a big kick
+(def *load-boost* 2.3)
 ; a hit at/above this load counts as LOADED: fires the glow + LOADED! callout
 (def *load-hit-min* 0.25)
+; load at/above which the paddle catches FIRE (flames + a MAX charge is imminent)
+(def *flame-load* 0.85)
 ; how near (fraction of paddle height) the ball's arrival an AI must sit to load
 (def *ai-load-window* 0.35)
-; speed ceiling (< *paddle-w* 5, so no tunnelling)
-(def *charge-max* 4.6)
+;; ball-speed ceiling. It can exceed `*paddle-w*` now: `step` splits the ball's travel
+;; into sub-steps no longer than `*max-substep*` (< `*paddle-w*`), so even a full-load
+;; rocket can't tunnel a paddle. A bigger ceiling ⇒ loaded hits actually rocket.
+(def *charge-max* 6.0)
+; longest a single collision sub-step moves the ball (< *paddle-w* 5 ⇒ no tunnelling)
+(def *max-substep* 4.0)
 ; frames the loaded-shot graphic (an expanding energy ring on the ball) plays
 (def *charge-glow-frames* 16)
 ; max |vy| (rows/frame) at serve — the random launch angle
@@ -110,6 +117,12 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; `:ai-aim-mult` — from near-helpless (1) to near-perfect (10).
 ; rows/frame a HUMAN paddle moves while its key is held (brisk enough to chase)
 (def *human-speed* 2.4)
+;; HUMAN paddle INERTIA: a held key ACCELERATES the paddle up to its max speed
+;; (`*paddle-accel*` rows/frame²), and releasing lets it DRIFT — velocity decays by
+;; `*paddle-friction*` each frame so it coasts to a stop with a little momentum
+;; rather than stopping dead. Gives the paddle weight without feeling sluggish.
+(def *paddle-accel* 0.7)
+(def *paddle-friction* 0.8)
 ;; ---- COLOUR & FX ----------------------------------------------------------
 ;; Everything rainbows: a global `:hue` advances `*hue-step*` degrees per frame,
 ;; and the ball, paddles, net and trail derive their colour from it (so the whole
@@ -865,12 +878,21 @@ bias and that defend/retreat asymmetry are what make the AI beatable."
       ph
       (side-speed st side base))))
 
-(defn human-side-top (st side ph paddle-top rows)
-  "Next top for a HUMAN paddle on `side`: move by its held-key direction
-(`:l-dir`/`:r-dir`) at `*human-speed*` (scaled by the same powerups/cheer the AI
-feels), clamped on court."
-  (let (dir (if (= side :left) (get st :l-dir) (get st :r-dir)))
-    (clamp (+ paddle-top (* dir (side-speed st side *human-speed*))) 0 (- rows ph))))
+(defn human-step (st side ph paddle-top rows)
+  "Next `[top vel]` for a HUMAN paddle on `side`: its held direction (`:l-dir`/
+`:r-dir`) ACCELERATES the paddle by `*paddle-accel*` up to its max speed (`*human-
+speed*` scaled by the same powerups/cheer/load the AI feels); releasing lets it
+DRIFT — velocity decays by `*paddle-friction*` so it coasts to a stop. Clamped on
+court, and hitting a wall kills the drift."
+  (let (dir (if (= side :left) (get st :l-dir) (get st :r-dir))
+        vel (get st (side-key side :l-vel :r-vel))
+        maxv (side-speed st side *human-speed*)
+        vel1 (if (= dir 0)
+               (* vel *paddle-friction*)
+               (clamp (+ vel (* dir *paddle-accel*)) (- 0 maxv) maxv))
+        raw (+ paddle-top vel1)
+        top (clamp raw 0 (- rows ph)))
+    [top (if (= top raw) vel1 0)]))
 
 (defn side-loading? (st side defend ph paddle-top rows)
   "Does `side` want to LOAD its paddle this frame? Never while it's DESTROYED (it
@@ -896,10 +918,10 @@ costs it a save, but the return still comes back hot."
     (max 0.0 (- cur *load-decay*))))
 
 (defn move-ai (st)
-  "Advance both paddles one frame. Each side is moved by `human-side-top` or
-`ai-side-top` per its controller, except a paddle a streaker splatted is FROZEN
-(it holds position until it thaws). Also builds/drains each paddle's LOAD (which
-slows its move; see `side-speed`) and re-rolls the AI aim bias periodically."
+  "Advance both paddles one frame. Each side is moved by `human-step` (with inertia)
+or `ai-side-top` per its controller, except a paddle a streaker splatted or destroyed
+is FROZEN (it holds position, zero velocity). Also builds/drains each paddle's LOAD
+(which slows its move; see `side-speed`) and re-rolls the AI aim bias periodically."
   (let (st0 (if (= 0 (mod (get st :t) *aim-period*)) (reroll-aim st) st)
         rows (get st0 :rows)
         lph (side-ph st0 :left rows)
@@ -919,18 +941,24 @@ slows its move; see `side-speed`) and re-rolls the AI aim bias periodically."
                         (side-loading? st0 :left l-defend lph (get st0 :lp) rows))
               :r-load (load-step (get st0 :r-load)
                         (side-loading? st0 :right r-defend rph (get st0 :rp) rows))))
-    (assoc st1
-      :t (+ (get st1 :t) 1)
-      :l-frozen (max 0 (- (get st1 :l-frozen) 1))
-      :r-frozen (max 0 (- (get st1 :r-frozen) 1))
-      :lp (cond
-            l-frozen (get st1 :lp)
-            l-human (human-side-top st1 :left lph (get st1 :lp) rows)
-            :else (ai-side-top st1 :left lph (get st1 :lp) rows l-defend))
-      :rp (cond
-            r-frozen (get st1 :rp)
-            r-human (human-side-top st1 :right rph (get st1 :rp) rows)
-            :else (ai-side-top st1 :right rph (get st1 :rp) rows r-defend)))))
+    (let (l-move (cond
+                   l-frozen [(get st1 :lp) 0]
+                   l-human (human-step st1 :left lph (get st1 :lp) rows)
+                   :else [(ai-side-top st1 :left lph (get st1 :lp) rows l-defend) 0])
+          r-move (cond
+                   r-frozen [(get st1 :rp) 0]
+                   r-human (human-step st1 :right rph (get st1 :rp) rows)
+                   :else [(ai-side-top st1 :right rph (get st1 :rp) rows r-defend) 0])
+          [ltop lvel] l-move
+          [rtop rvel] r-move)
+      (assoc st1
+        :t (+ (get st1 :t) 1)
+        :l-frozen (max 0 (- (get st1 :l-frozen) 1))
+        :r-frozen (max 0 (- (get st1 :r-frozen) 1))
+        :lp ltop
+        :l-vel lvel
+        :rp rtop
+        :r-vel rvel))))
 
 (defn overlap? (by paddle-top ph)
   "Does the ball (top `by`, height `*ball-h*`) vertically overlap a paddle
@@ -1873,9 +1901,11 @@ the trail, particles, flash, crowd cheer, active effects, and floating tokens. P
           ;; SLOW-MO scales the per-frame travel; an EARTHQUAKE holds a shake
           scale (if (= ev :slowmo) *slowmo-scale* 1)
           ;; GAME difficulty scales how far the ball travels per frame; split into
-          ;; `nsub` sub-steps so even a doubled (insane-mode) ball never tunnels
+          ;; `nsub` sub-steps each no longer than `*max-substep*` cells, so even a
+          ;; full-load rocket in insane mode can't tunnel a paddle (sized by the ball's
+          ;; actual x-travel this frame, not just `bmult`).
           bmult (get m :ball-mult)
-          nsub (max 1 (ceil bmult))
+          nsub (max 1 (ceil (/ (* (abs vx) scale bmult) *max-substep*)))
           perstep (/ (* scale bmult) nsub)
           b (assoc m
               :vx vx
@@ -1926,6 +1956,8 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :r-ctrl (get ctrls :r-ctrl)
        :l-dir 0
        :r-dir 0
+       :l-vel 0
+       :r-vel 0
        :l-shoot false
        :r-shoot false
        :l-load 0
@@ -2500,6 +2532,30 @@ DESTROYED (no shot to charge), so an idle or broken paddle shows none."
             c (hsv->rgb (mod (+ (get st :hue) 40) 360) 0.75 1.0))
         [[:rect ptop col 1 ph {:bg [40 44 60]}] [:rect top col 1 fill {:bg c}]]))))
 
+(defn flame-ops (st side)
+  "Licking FLAMES off a paddle charged past `*flame-load*` — flickering red→orange→
+yellow tongues along its court-facing edge, their length wavering with the frame
+counter so they dance. Nil for an under-charged or destroyed paddle."
+  (let (load (get st (side-key side :l-load :r-load)))
+    (if (or (< load *flame-load*) (paddle-broken? st side))
+      nil
+      (let (rows (get st :rows)
+            ph (side-ph st side rows)
+            ptop (floor (get st (side-key side :lp :rp)))
+            px (if (= side :left) (left-x) (right-x (get st :cols)))
+            ;; flames lick INWARD toward the court off the paddle's inner edge
+            edge (if (= side :left) (+ px *paddle-w*) px)
+            t (get st :t))
+        (mapcat
+          (fn (i)
+            (let (fy (+ ptop (* i 2))
+                  ; flicker: tongue length wavers with row + frame
+                  len (+ 2 (mod (+ (* i 5) (* t 2)) 5))
+                  left (if (= side :left) edge (- edge len))
+                  hue (mod (+ 6 (* i 3) t) 42))
+              [[:rect fy left len 1 {:bg (hsv->rgb hue 0.95 1.0)}]]))
+          (range (max 2 (quot ph 2))))))))
+
 (defn charge-aura-ops (st)
   "The CHARGED-shot graphic: a bright energy ring that expands and fades out from
 the ball over `*charge-glow-frames*` — the visible kick of a loaded hit."
@@ -2548,6 +2604,8 @@ ball, and the announcer — all shifted by the current screen-shake offset."
                 (particle-ops (get st :particles))
                 (token-ops st)
                 (streaker-ops st)
+                (flame-ops st :left)
+                (flame-ops st :right)
                 left-ops
                 right-ops
                 (load-bar-ops st :left)

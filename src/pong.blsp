@@ -57,16 +57,19 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *hit-speedup* 0.12)
 ; fraction of the over-baseline pace a hit retains (momentum bleed toward baseline)
 (def *momentum-keep* 0.75)
-;; LOADING: instead of a random timing window, a player HOLDS a load key to charge
-;; their paddle (`:l-load`/`:r-load`, 0..1). The charge OSCILLATES — it rises to full
-;; then falls back and ping-pongs (`load-step`), so you can't just hold at max, you
-;; must catch the PEAK. While loading the paddle moves SLOWER (down to a `*load-slow*`
-;; cut at full charge), and the loaded hit ROCKETS the ball back — up to `*load-boost*`×
-;; at full charge (capped at `*charge-max*`; the ball's travel is sub-stepped so even
-;; that rocket can't tunnel). A paddle charged past `*flame-load*` catches FIRE. The AI
-;; loads too (`side-loading?` / `ai-load-plan`): it TIMES the charge so its peak lands
-;; on the ball's arrival — near-perfect at high difficulty, mistimed (or skipped) at low
-;; — and only when already in position, so the slow-down never costs it a save.
+;; LOADING: a player HOLDS a load key to charge their paddle (`:l-load`/`:r-load`,
+;; 0..1). The charge OSCILLATES — it rises to full then ping-pongs back down
+;; (`load-step`) — and is COMMITTED on RELEASE: let go while stationary and the charge
+;; LOCKS at its current value (banked until the hit); let go while the paddle is moving
+;; and it RESETS to 0. Release in the last `*release-window*` before the ball arrives —
+;; a well-timed 'perfect release' — and the shot gets an extra `*release-boost*`. While
+;; a charge is live/locked the paddle moves SLOWER (down to a `*load-slow*` cut at full),
+;; and the loaded hit ROCKETS the ball back — up to `*load-boost*`× at full charge
+;; (capped at `*charge-max*`; the ball's travel is sub-stepped so even that can't
+;; tunnel). A paddle charged past `*flame-load*` catches FIRE. The AI loads too
+;; (`side-loading?` / `ai-load-plan`): it TIMES the charge peak onto the ball's arrival
+;; (near-perfect at high difficulty, mistimed/skipped at low) and lands the perfect-
+;; release bonus with probability `:ai-timing` (level/10 — level 10 always, level 1 10%).
 ;; Discharges to 0 on contact — a loaded hit is a one-shot.
 ; load gained per frame while charging (~0.4 s to full — quick)
 (def *load-rate* 0.04)
@@ -80,6 +83,10 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *load-hit-min* 0.25)
 ; load at/above which the paddle catches FIRE (flames + a MAX charge is imminent)
 (def *flame-load* 0.85)
+; frames before contact within which a RELEASE counts as a 'perfect' timing (~200 ms)
+(def *release-window* 12)
+; ×extra shot speed for a perfect release (stacks on the load, still capped)
+(def *release-boost* 1.3)
 ; how near (fraction of paddle height) the ball's arrival an AI must sit to load
 (def *ai-load-window* 0.35)
 ;; ball-speed ceiling. It can exceed `*paddle-w*` now: `step` splits the ball's travel
@@ -787,7 +794,9 @@ back to the middle (5). The `2.4` aim top is calibrated (defence sim) so:
      :ai-return-mult (lerp 0.35 2.6)
      :ai-aim-mult (lerp 2.4 0.0)
      ;; how well the AI TIMES its load: 0 (mistimed, often skips) → 1 (peaks perfectly)
-     :ai-load-skill (lerp 0.0 1.0)}))
+     :ai-load-skill (lerp 0.0 1.0)
+     ;; odds the AI lands the perfect-release bonus: level/10 (10 always, 1 → 10%)
+     :ai-timing (/ lvl 10.0)}))
 
 (defn game-params (level)
   "The GAME-difficulty multipliers for `level` (0–10) — the pace-and-chaos dial,
@@ -957,18 +966,20 @@ that's `target / *load-rate*` frames out)."
               (< (abs (- arrival pc)) window)
               (<= frames (/ plan *load-rate*))))))
 
-(defn load-step (cur dir loading?)
+(defn load-step (cur dir loading? locked?)
   "Advance a paddle's load one frame, returning `[load' dir']` (`dir` +1 rising / -1
 falling). While `loading?` the charge OSCILLATES: it rises by `*load-rate*` to full
 (1.0) then reverses and falls to 0, ping-ponging — you can't hold at max, you must
-catch the peak. Released, it drains by `*load-decay*` toward 0 (direction reset)."
-  (if loading?
-    (let (n (+ cur (* dir *load-rate*)))
-      (cond
-        (>= n 1.0) [1.0 -1]
-        (<= n 0.0) [0.0 1]
-        :else [n dir]))
-    [(max 0.0 (- cur *load-decay*)) 1]))
+catch the peak. `locked?` (released while stationary) HOLDS the banked charge. Otherwise
+it drains by `*load-decay*` toward 0 (direction reset)."
+  (cond
+    loading? (let (n (+ cur (* dir *load-rate*)))
+               (cond
+                 (>= n 1.0) [1.0 -1]
+                 (<= n 0.0) [0.0 1]
+                 :else [n dir]))
+    locked? [cur dir]
+    :else [(max 0.0 (- cur *load-decay*)) 1]))
 
 (defn move-ai (st)
   "Advance both paddles one frame. Each side is moved by `human-step` (with inertia)
@@ -991,10 +1002,12 @@ is FROZEN (it holds position, zero velocity). Also builds/drains each paddle's L
         ;; charge/drain LOAD first, then move (movement reads it via `side-speed`)
         [l-load l-dir] (load-step (get st0 :l-load)
                          (get st0 :l-load-dir)
-                         (side-loading? st0 :left l-defend lph (get st0 :lp) rows))
+                         (side-loading? st0 :left l-defend lph (get st0 :lp) rows)
+                         (get st0 :l-locked?))
         [r-load r-dir] (load-step (get st0 :r-load)
                          (get st0 :r-load-dir)
-                         (side-loading? st0 :right r-defend rph (get st0 :rp) rows))
+                         (side-loading? st0 :right r-defend rph (get st0 :rp) rows)
+                         (get st0 :r-locked?))
         st1 (assoc st0 :l-load l-load :l-load-dir l-dir :r-load r-load :r-load-dir r-dir))
     (let (l-move (cond
                    l-frozen [(get st1 :lp) 0]
@@ -1143,27 +1156,45 @@ the return pace (each hit adds `*hit-speedup*`; the load multiplies it up), DISC
 that paddle's load to 0, deflect, bump the RALLY counter, fire callouts, and
 `contact` with intensity that BUILDS with the rally. A loaded hit (`*load-hit-min*`+)
 gets its own louder callout + shake + the charge glow."
-  (let (loadk (side-key (get st :owner) :l-load :r-load)
-        dirk (side-key (get st :owner) :l-load-dir :r-load-dir)
+  (let (owner (get st :owner)
+        loadk (side-key owner :l-load :r-load)
+        dirk (side-key owner :l-load-dir :r-load-dir)
+        lockedk (side-key owner :l-locked? :r-locked?)
+        human? (= (get st (side-key owner :l-ctrl :r-ctrl)) :human)
         load (get st loadk)
         loaded? (>= load *load-hit-min*)
+        [troll s1] (rand-float (get st :s))
+        ;; PERFECT RELEASE (+`*release-boost*`): a human who LOCKED the charge within the
+        ;; `*release-window*` before contact; the AI lands it with odds `:ai-timing`
+        ;; (level/10). Only counts when there's actually a charge to release.
+        perfect? (and (> load 0.05)
+                   (if human?
+                     (and (get st lockedk)
+                       (<= (- (get st :t) (get st (side-key owner :l-release-t :r-release-t)))
+                         *release-window*))
+                     (< troll (get st :ai-timing))))
         r (+ (get st :rally) 1)
         ; bump the rally's rising baseline (capped), then bleed the pace toward it
         base (min *charge-max* (+ (get st :base-vx) *hit-speedup*))
-        speed (return-speed-for (abs (get st :vx)) load base)
+        raw-speed (return-speed-for (abs (get st :vx)) load base)
+        speed (if perfect? (min *charge-max* (* raw-speed *release-boost*)) raw-speed)
         n (min *part-max* (+ *hit-particles* (* r *rally-particle-step*)))
         shake (+ *hit-shake* (min *rally-shake-cap* (* r *rally-shake-step*)) (if loaded? 3 0))
-        ;; `:rally` is the live SHOT COUNT of this rally — bumped on every paddle hit;
-        ;; the hit spends the paddle's load (→ 0) and a loaded one lights the `:charge-glow`
-        deflected (assoc (deflect st new-bx paddle-top ph speed)
+        ;; `:rally` is the live SHOT COUNT of this rally — bumped on every paddle hit; the
+        ;; hit spends the paddle's load + lock (→ 0) and a loaded one lights `:charge-glow`
+        deflected (assoc (deflect (assoc st :s s1) new-bx paddle-top ph speed)
                     :rally r
                     :base-vx base
                     loadk 0
                     dirk 1
-                    :charge-glow (if loaded? *charge-glow-frames* (get st :charge-glow)))
-        announced (if loaded?
-                    (announce deflected "LOADED!" (get deflected :hue) *announce-life*)
-                    (rally-announce deflected r))
+                    lockedk false
+                    :charge-glow (if (or loaded? perfect?)
+                                   *charge-glow-frames*
+                                   (get st :charge-glow)))
+        announced (cond
+                    perfect? (announce deflected "PERFECT!" (get deflected :hue) *announce-life*)
+                    loaded? (announce deflected "LOADED!" (get deflected :hue) *announce-life*)
+                    :else (rally-announce deflected r))
         hit (contact announced
               x
               (center by *ball-h*)
@@ -2057,10 +2088,16 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :r-load-dir 1
        :l-loading false
        :r-loading false
+       :l-locked? false
+       :r-locked? false
+       ;; frame the charge was locked (for the perfect-release window); way in the past
+       :l-release-t -999
+       :r-release-t -999
        :ai-speed-mult (get diff :ai-speed-mult)
        :ai-return-mult (get diff :ai-return-mult)
        :ai-aim-mult (get diff :ai-aim-mult)
        :ai-load-skill (get diff :ai-load-skill)
+       :ai-timing (get diff :ai-timing)
        ;; stable per-match seed for the AI's per-rally load plan (never mutated)
        :seed0 s
        :ball-mult (get game :ball-mult)
@@ -2798,11 +2835,30 @@ side, so a stray key can't make an AI paddle fire."
     (if (= ctrl :human) (assoc st key on) st)))
 
 (defn set-loading (st side on)
-  "Set `side`'s held LOAD intent (`:l-loading`/`:r-loading`) — HUMAN side only, so a
-stray key can't charge an AI paddle (an AI decides for itself in `side-loading?`)."
-  (let (ctrl (get st (side-key side :l-ctrl :r-ctrl))
-        key (side-key side :l-loading :r-loading))
-    (if (= ctrl :human) (assoc st key on) st)))
+  "Drive a HUMAN `side`'s LOAD via its key (an AI decides for itself in `side-loading?`).
+PRESS (`on` true) starts a fresh oscillating charge. RELEASE (`on` false) COMMITS it: if
+the paddle is moving the charge RESETS to 0, otherwise it LOCKS at its current value and
+stamps `:*-release-t` (for the perfect-release window at contact)."
+  (let (ctrl (get st (side-key side :l-ctrl :r-ctrl)))
+    (if (not (= ctrl :human))
+      st
+      (if on
+        (assoc st
+          (side-key side :l-loading :r-loading) true
+          (side-key side :l-locked? :r-locked?) false
+          (side-key side :l-load :r-load) 0
+          (side-key side :l-load-dir :r-load-dir) 1)
+        (if (> (abs (get st (side-key side :l-vel :r-vel))) 0.3)
+          ; released while moving ⇒ the charge is lost
+          (assoc st
+            (side-key side :l-loading :r-loading) false
+            (side-key side :l-locked? :r-locked?) false
+            (side-key side :l-load :r-load) 0)
+          ; released while set ⇒ lock the charge, stamp the release frame
+          (assoc st
+            (side-key side :l-loading :r-loading) false
+            (side-key side :l-locked? :r-locked?) true
+            (side-key side :l-release-t :r-release-t) (get st :t)))))))
 
 (defn left-fire-key? (k)
   "Is `k` the LEFT player's shoot key (Space)?"

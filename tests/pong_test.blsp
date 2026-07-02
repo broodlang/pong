@@ -158,6 +158,13 @@
       ; slow ⇒ slower
       (is (< (side-speed slowed :right 1.0) 1.0))
       (is (= (side-speed slowed :left 1.0) 1.0))))
+  (test "a size buff is capped so it can't wall off a large court"
+    (let (rows 400
+          stacked (assoc (init 800 rows 7)
+                    :l-fx [{:kind :grow :life 100} {:kind :giant :life 100}]))
+      ; grow×giant would be ~4.7× the base, but the cap holds it to *paddle-max-frac*
+      (is (<= (side-ph stacked :left rows) (round (* rows *paddle-max-frac*))))
+      (is (< (side-ph stacked :left rows) (round (* (paddle-h rows) *fx-grow* *fx-giant*))))))
   (test "spawn-powerup drops a token and advances the PRNG"
     (let (st (spawn-powerup (init 400 200 7)))
       (is (= (count (get st :tokens)) 1))
@@ -176,19 +183,47 @@
       (is (= (count (get free :tokens)) 1))
       (is (= (count (get free :r-fx)) 0)))))
 
-(describe "charged shot & momentum"
-  (test "a charged hit returns faster than a normal one (capped, no tunnelling)"
-    (is (> (return-speed-for *ball-vx* true) (return-speed-for *ball-vx* false)))
-    (is (<= (return-speed-for 99 true) *charge-max*))
+(describe "loaded shot & escalation"
+  (test "a fully-loaded hit returns faster than an unloaded one (capped, no tunnelling)"
+    (is (> (return-speed-for *ball-vx* 1.0 *ball-vx*) (return-speed-for *ball-vx* 0 *ball-vx*)))
+    (is (<= (return-speed-for 99 1.0 *ball-vx*) *charge-max*))
     (is (< *charge-max* *paddle-w*)))
-  ; but bleeding back toward base
-  (test "a normal hit keeps momentum: a fast ball stays above base, easing back"
-    (let (kept (return-speed-for 4.0 false))
-      ; still fast
+  (test "load scales the return pace monotonically"
+    (is (< (return-speed-for *ball-vx* 0.25 *ball-vx*) (return-speed-for *ball-vx* 0.75 *ball-vx*))))
+  (test "momentum bleeds a fast ball back toward the baseline (stays fast, eases down)"
+    (let (kept (return-speed-for 4.0 0 *ball-vx*))
       (is (> kept *ball-vx*))
       (is (< kept 4.0))))
-  (test "a normal hit at base speed returns at base speed"
-    (is (= (return-speed-for *ball-vx* false) *ball-vx*))))
+  (test "the baseline rises each hit, so the rally's floor keeps climbing"
+    ; the same hit against a raised baseline returns faster than against the old one
+    (is (> (return-speed-for *ball-vx* 0 (+ *ball-vx* *hit-speedup*))
+          (return-speed-for *ball-vx* 0 *ball-vx*)))))
+
+(describe "loading the paddle"
+  (test "load builds while holding and drains when released"
+    (is (> (load-step 0.5 true) 0.5))
+    (is (< (load-step 0.5 false) 0.5))
+    ; clamped into [0,1]
+    (is (= (load-step 1.0 true) 1.0))
+    (is (= (load-step 0.0 false) 0.0)))
+  (test "a loaded paddle moves slower than an idle one"
+    (let (st (init 200 60 7))
+      (is (< (side-speed (assoc st :l-load 1.0) :left *human-speed*)
+            (side-speed (assoc st :l-load 0) :left *human-speed*)))))
+  (test "a held load key charges a human paddle over frames; a hit discharges it"
+    (let (pve (init 200 60 7 {:mode :pve :difficulty 5 :game 5 :points 11})
+          held (assoc pve :l-loading true)
+          charged (reduce (fn (s _) (move-ai s)) held (range 20)))
+      (is (> (get charged :l-load) 0))
+      ; a paddle hit spends the load back to 0
+      (is (= 0
+            (get (paddle-hit (assoc charged :owner :left)
+                   20
+                   (get charged :lp)
+                   (side-ph charged :left (get charged :rows))
+                   20
+                   (get charged :by))
+              :l-load))))))
 
 (describe "paddle colour"
   (test "a clean paddle keeps its fixed base colour (no rainbow)"
@@ -262,7 +297,12 @@
       (is (>= (top-row quiet) (top-row busy))))))
 (describe "aliens"
   (test "the rare-event roll eventually summons a UFO"
-    (let (out (reduce (fn (s _) (if (nil? (get s :ufo)) (step-event (assoc s :ufo-timer 1) :ufo-timer spawn-ufo) s)) (init 400 180 7) (range 50)))
+    (let (out (reduce (fn (s _)
+                        (if (nil? (get s :ufo))
+                          (step-event (assoc s :ufo-timer 1) :ufo-timer spawn-ufo)
+                          s))
+                (init 400 180 7)
+                (range 50)))
       (is (not (nil? (get out :ufo))))))
   (test "the event check resets to a ~1-minute (jittered) timer"
     (let ([frames _] (next-check-timer 12345))
@@ -358,7 +398,8 @@
           out (step-streaks st))
       (is (every? (fn (p) (and (>= (get p :x) 0) (< (get p :x) 200))) (get out :streaks)))))
   (test "the STORM power-up whips up a gale for a while"
-    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left) {:kind :wind :good? false :name "STORM" :glyph "@" :x 50 :y 50}))
+    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left)
+                {:kind :wind :good? false :name "STORM" :glyph "@" :x 50 :y 50}))
       (is (= (get out :wind-gust) *wind-gust-frames*))
       (is (= (get out :announce) "STORM!"))))
   (test "while a storm is active the wind targets a strong gale, not a lull"
@@ -405,11 +446,13 @@
   (test "the default gun is the pistol"
     (is (= (gun-of (init 400 120 7) :left) :pistol)))
   (test "a GUN power-up swaps the gun and replaces ammo with its magazine"
-    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left :l-ammo 99) {:kind :shotgun :good? true :name "SHOTGUN" :glyph "S" :x 50 :y 50}))
+    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left :l-ammo 99)
+                {:kind :shotgun :good? true :name "SHOTGUN" :glyph "S" :x 50 :y 50}))
       (is (= (get out :l-gun) :shotgun))
       (is (= (get out :l-ammo) (gun-stat :shotgun :mag)))))
   (test "the AMMO power-up tops up the current gun by a magazine"
-    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left :l-gun :smg :l-ammo 5) {:kind :ammo :good? true :name "AMMO" :glyph "*" :x 50 :y 50}))
+    (let (out (apply-powerup (assoc (init 400 120 7) :owner :left :l-gun :smg :l-ammo 5)
+                {:kind :ammo :good? true :name "AMMO" :glyph "*" :x 50 :y 50}))
       (is (= (get out :l-ammo) (+ 5 (gun-stat :smg :mag))))))
   (test "the shotgun fires a multi-pellet spread for one ammo"
     (let (out (side-fire (assoc (init 400 120 7) :l-gun :shotgun :l-ammo 3 :l-fire 1 :vx 2.7) :left))
@@ -427,7 +470,12 @@
       (is (= (get out :l-ammo) 3))))
   (test "a hit cracks the paddle; a second hit breaks it"
     (let (shot (fn (st)
-                 (bullet-hits (assoc st :bullets [{:x (- (right-x 400) 1) :y 50 :vx *bullet-speed* :side :left}] :rp 45)))
+                 (bullet-hits (assoc st
+                                :bullets [{:x (- (right-x 400) 1)
+                                           :y 50
+                                           :vx *bullet-speed*
+                                           :side :left}]
+                                :rp 45)))
           cracked (shot (init 400 120 7))
           broken (shot cracked))
       (is (= (get cracked :r-dmg) 1))
@@ -476,7 +524,8 @@
     (let (out (step (assoc (init 400 120 7) :event {:kind :slowmo :life 99} :vx 2 :vy 0 :bx 100)))
       (is (< (- (get out :bx) 100) 2))))
   (test "TINY shrinks the paddles"
-    (is (< (side-ph (assoc (init 400 120 7) :event {:kind :tiny :life 99}) :left 100) (side-ph (init 400 120 7) :left 100)))))
+    (is (< (side-ph (assoc (init 400 120 7) :event {:kind :tiny :life 99}) :left 100)
+          (side-ph (init 400 120 7) :left 100)))))
 
 (describe "crowd shows (cosmetic)"
   (test "spawn-show picks one of the catalog shows"
@@ -486,4 +535,9 @@
     (let (out (step-show (assoc (init 400 120 7) :show {:kind :lights :life 1})))
       (is (nil? (get out :show)))))
   (test "every show kind renders some ops"
-    (is (every? (fn (k) (> (count (crowd-show-ops (assoc (init 400 120 7) :show {:kind k :life 99}) 400 100)) 0)) *shows*))))
+    (is (every? (fn (k)
+                  (> (count (crowd-show-ops (assoc (init 400 120 7) :show {:kind k :life 99})
+                              400
+                              100))
+                    0))
+          *shows*))))

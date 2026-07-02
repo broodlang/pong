@@ -210,12 +210,30 @@
           (return-speed-for *ball-vx* 0 *ball-vx*)))))
 
 (describe "loading the paddle"
-  (test "load builds while holding and drains when released"
-    (is (> (load-step 0.5 true) 0.5))
-    (is (< (load-step 0.5 false) 0.5))
-    ; clamped into [0,1]
-    (is (= (load-step 1.0 true) 1.0))
-    (is (= (load-step 0.0 false) 0.0)))
+  (test "load oscillates while held (rises, bounces off the top) and drains on release"
+    ; rising
+    (let ([v d] (load-step 0.5 1 true))
+      (is (> v 0.5))
+      (is (= d 1)))
+    ; at the top it reverses direction and starts coming back down
+    (let ([v d] (load-step 0.99 1 true))
+      (is (= v 1.0))
+      (is (= d -1)))
+    (is (< (first (load-step 1.0 -1 true)) 1.0))
+    ; released ⇒ drains toward 0, direction reset to rising
+    (let ([v d] (load-step 0.5 -1 false))
+      (is (< v 0.5))
+      (is (= d 1))))
+  (test "ai-load-plan: high skill aims at a full peak, low skill mistimes or skips"
+    ;; skill 1 always targets a full 1.0
+    (is (= (ai-load-plan (assoc (init 200 60 7) :ai-load-skill 1.0 :rally 3) :left) 1.0))
+    ;; skill 0 across rallies: each plan is either 0 (skipped) or a mistimed 0.2–0.8
+    (let (plans (map (fn (r)
+                       (ai-load-plan (assoc (init 200 60 7) :ai-load-skill 0.0 :rally r) :left))
+                  (range 40))
+          loads (filter (fn (p) (> p 0)) plans))
+      (is (> (count (filter (fn (p) (= p 0)) plans)) 0))
+      (is (every? (fn (p) (and (>= p 0.2) (<= p 0.8))) loads))))
   (test "a loaded paddle moves slower than an idle one"
     (let (st (init 200 60 7))
       (is (< (side-speed (assoc st :l-load 1.0) :left *human-speed*)

@@ -131,7 +131,7 @@
       (is (= (get won :winner) :left))
       (is (= (get won :ls) *win-score*))
       (is (= (get won :rs) 3))
-      (is (= (get won :r-dmg) 2))
+      (is (= (get won :r-dmg) *paddle-hits-max*))
       (is (= (get won :announce) "LEFT WINS!"))))
   (test "an ordinary point increments the score and announces POINT"
     (let (p (point (assoc (init 200 60 7) :ls 2 :rs 2) :right 0 1))
@@ -468,7 +468,7 @@
     (let (out (side-fire (assoc (init 400 120 7) :l-ammo 3 :l-fire 1 :vx -2.7) :left))
       (is (= (count (get out :bullets)) 0))
       (is (= (get out :l-ammo) 3))))
-  (test "a hit cracks the paddle; a second hit breaks it"
+  (test "hits crack the paddle incrementally; the *paddle-hits-max*th destroys it"
     (let (shot (fn (st)
                  (bullet-hits (assoc st
                                 :bullets [{:x (- (right-x 400) 1)
@@ -476,15 +476,37 @@
                                            :vx *bullet-speed*
                                            :side :left}]
                                 :rp 45)))
-          cracked (shot (init 400 120 7))
-          broken (shot cracked))
-      (is (= (get cracked :r-dmg) 1))
-      (is (= (get broken :r-dmg) 2))))
+          d1 (shot (init 400 120 7))
+          d2 (shot d1)
+          d3 (shot d2)
+          d4 (shot d3))
+      (is (= (get d1 :r-dmg) 1))
+      (is (= (get d2 :r-dmg) 2))
+      ; the destroying hit sets dmg to the max and starts the repair timer
+      (is (= (get d3 :r-dmg) *paddle-hits-max*))
+      (is (= (get d3 :r-broke) *paddle-broke-frames*))
+      (is (paddle-broken? d3 :right))
+      ; further hits can't take it past destroyed
+      (is (= (get d4 :r-dmg) *paddle-hits-max*))))
   ; not reversed ⇒ passed through
-  (test "a broken paddle no longer blocks the ball"
-    (let (st (assoc (init 400 120 7) :r-dmg 2 :bx (- (right-x 400) 1) :by 50 :vx 2.7 :rp 45)
+  (test "a destroyed paddle no longer blocks the ball"
+    (let (st (assoc (init 400 120 7)
+               :r-dmg *paddle-hits-max*
+               :bx (- (right-x 400) 1)
+               :by 50
+               :vx 2.7
+               :rp 45)
           out (bounce-paddles st))
       (is (> (get out :vx) 0))))
+  (test "a destroyed paddle repairs after *paddle-broke-frames*, not on a score"
+    (let (broke (assoc (init 400 120 7) :r-dmg *paddle-hits-max* :r-broke *paddle-broke-frames*)
+          ; a score never heals it
+          scored (point (assoc broke :ls 0 :rs 0) :left 400 -1)
+          ; but the timer running out does
+          healed (reduce (fn (s _) (step-broke s)) broke (range *paddle-broke-frames*)))
+      (is (paddle-broken? scored :right))
+      (is (= (get healed :r-dmg) 0))
+      (is (not (paddle-broken? healed :right)))))
   (test "bullets gun down the streaker too"
     (let (st (assoc (init 400 120 7)
                :streaker {:x 100 :y 50 :vx 1.5 :vy 0 :ty 50 :bumped false}

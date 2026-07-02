@@ -256,21 +256,26 @@
     (let (scored (point (assoc (init 200 60 7) :ls 0 :rs 0) :left 200 -1))
       (is (> (get scored :cheer) 0))
       (is (< (get (step scored) :cheer) (get scored :cheer)))))
-  ; fully hyped by the late shots
-  (test "excitement is calm until the start shot, then ramps to full"
-    (let (exc (fn (r) (crowd-excitement (assoc (init 200 60 7) :rally r :cheer 0))))
-      ; dead calm early
-      (is (= (exc 0) 0))
-      ; still calm at the start threshold
-      (is (= (exc *excite-start*) 0))
-      ; ramping mid-rally
-      (is (< 0 (exc 5) 1))
-      (is (>= (exc *excite-full*) 1))))
+  ; hype tracks the ball's pace (baseline × game-difficulty), so faster ⇒ wilder
+  (test "excitement tracks ball pace: calm at base, ramps up, harder games hyped more"
+    (let (exc (fn (base mult)
+                (crowd-excitement (assoc (init 200 60 7) :base-vx base :ball-mult mult :cheer 0))))
+      ; dead calm at the base serve pace of a standard game
+      (is (= (exc *ball-vx* 1.0) 0))
+      ; a rally's rising baseline builds the hype
+      (is (< 0 (exc 3.5 1.0) 1))
+      (is (>= (exc *excite-frantic-pace* 1.0) 1))
+      ; at the SAME baseline, a harder/faster game (bigger ball-mult) is more hyped
+      (is (> (exc *ball-vx* 2.0) (exc *ball-vx* 0.6)))))
   (test "a hyped crowd stands higher than a calm one, and stays in its band"
     (let (rows 52
           top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
-          calm (crowd-ops (assoc (init 200 60 7) :rally 0 :cheer 0) 200 rows)
-          hyped (crowd-ops (assoc (init 200 60 7) :rally 99 :cheer 0) 200 rows))
+          calm (crowd-ops (assoc (init 200 60 7) :base-vx *ball-vx* :ball-mult 1.0 :cheer 0)
+                 200
+                 rows)
+          hyped (crowd-ops (assoc (init 200 60 7) :base-vx *charge-max* :ball-mult 2.0 :cheer 0)
+                  200
+                  rows))
       ; it's a packed crowd, not a bar
       (is (> (count calm) 20))
       ; hyped reaches higher (smaller row)

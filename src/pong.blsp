@@ -280,10 +280,11 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *fx-badge-top* 2)
 ;; ---- THE CROWD ------------------------------------------------------------
 ;; A packed grandstand along the bottom — rows of little spectators (torso, head,
-;; and arms that fly up). They build EXCITEMENT the longer the current rally runs
-;; (`crowd-excitement`: the whole stand rises and brightens), run a perpetual
-;; MEXICAN WAVE whose crest lifts each seat as it sweeps past (taller when hyped),
-;; and on a point ERUPT — leaping with arms up in a riot of colour (`:cheer`).
+;; and arms that fly up). They build EXCITEMENT with the BALL'S PACE (`crowd-excitement`
+;; tracks `:base-vx` × the game's `:ball-mult`, so a faster/harder game — or a
+;; rally's rising baseline — whips the whole stand up and brightens it), run a
+;; perpetual MEXICAN WAVE whose crest lifts each seat as it sweeps past (taller when
+;; hyped), and on a point ERUPT — leaping with arms up in a riot of colour (`:cheer`).
 ; rows the grandstand occupies along the bottom (tall enough for figures + leaps)
 (def *crowd-rows* 16)
 ; columns between spectators in a tier, and each spectator's width
@@ -292,10 +293,13 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ; tiers of spectators (depth) — back tiers sit `*crowd-tier-rise*` cells higher + dimmer
 (def *crowd-tiers* 2)
 (def *crowd-tier-rise* 3)
-; the crowd stays calm until the `*excite-start*`th shot of the point, then ramps
-; up, fully hyped (whole stand stands) by the `*excite-full*`th shot
-(def *excite-start* 3)
-(def *excite-full* 8)
+;; The crowd's hype tracks the ball's on-screen PACE (`:base-vx` × `:ball-mult`):
+;; calm at `*excite-calm-pace*` cells/frame, fully hyped (whole stand stands) at
+;; `*excite-frantic-pace*`. So a slow game (game 0 ⇒ pace ~1.6) barely stirs them,
+;; the standard game (5) whips them up as a rally's baseline climbs, and a hard/fast
+;; game (10 ⇒ pace 5.4+) keeps the stand on its feet throughout.
+(def *excite-calm-pace* 2.7)
+(def *excite-frantic-pace* 4.4)
 ; shot counts at which the crowd runs a SINGLE / DOUBLE / TRIPLE Mexican wave
 (def *wave-threshold* 10)
 (def *wave-double* 20)
@@ -742,24 +746,24 @@ puts the human on the LEFT (W/S) against the right AI, EvE is two AIs."
 
 (defn difficulty-params (level)
   "The AI tuning multipliers for difficulty `level` (1–10), interpolated linearly
-from a near-helpless level 1 to a near-perfect level 10. As the level climbs the
+from a horrible level 1 to a near-flawless level 10. As the level climbs the
 defending/return speed RISES and the aim bias (the deliberate-miss source —
 `:ai-aim-mult` scales `*aim-error*`) SHRINKS to zero. A non-numeric `level` falls
-back to the middle (5).
+back to the middle (5). The `2.4` aim top is calibrated (defence sim) so:
 
-- Level 1: paddle crawls (×0.4) and is wildly mis-aimed (bias ×3.8), so it's
-  almost always out of position — a human (or the other paddle) wins at will.
-- Level 10: paddle is very fast (×3.0) with ZERO aim bias, so — already aiming at
-  the ball's exact bounce-folded arrival (`predict-center`) — it never mis-places
-  itself. The only points it ever concedes come from the wind / court events
-  curving the ball off that straight-line prediction, so it's near-unbeatable
-  without being a literal stalemate."
+- Level 1: bias ×2.4 (≈ *aim-error* of ~1.7 paddle-heights) ⇒ it MISSES about half
+  the balls it faces — genuinely horrible, a human beats it at will.
+- Level 10: ZERO aim bias, so — already aiming at the ball's exact bounce-folded
+  arrival (`predict-center`) at ×3.0 speed — it's near-flawless, conceding only the
+  odd point the wind / court events curve off its straight-line prediction.
+- The useful skill gradient sits in levels 1–6; 7–10 are all near-flawless on a calm
+  court and differ mainly in speed and robustness to on-court chaos."
   (let (lvl (clamp (if (number? level) level 5) 1 10)
         t (/ (- lvl 1) 9.0)
         lerp (fn (lo hi) (+ lo (* t (- hi lo)))))
     {:ai-speed-mult (lerp 0.4 3.0)
      :ai-return-mult (lerp 0.35 2.6)
-     :ai-aim-mult (lerp 3.8 0.0)}))
+     :ai-aim-mult (lerp 2.4 0.0)}))
 
 (defn game-params (level)
   "The GAME-difficulty multipliers for `level` (0–10) — the pace-and-chaos dial,
@@ -2113,11 +2117,14 @@ glyph — `+`/`>` for GROW/SPEED, `-`/`~` for SHRINK/SLOW — with a throb pulse
       (get st :tokens))))
 
 (defn crowd-excitement (st)
-  "The crowd's hype, 0→1: stays at 0 until the `*excite-start*`th shot of the
-point, then ramps to full by the `*excite-full*`th — and is pegged high right
-after a point (the cheer). Drives how high the stand stands and how big the wave."
-  (max (clamp (/ (- (get st :rally) *excite-start*) (- *excite-full* *excite-start*)) 0 1)
-    (/ (get st :cheer) (max 1 *cheer-frames*))))
+  "The crowd's hype, 0→1: driven by the ball's on-screen PACE (`:base-vx` × the
+game-difficulty `:ball-mult`), calm at `*excite-calm-pace*` and fully hyped at
+`*excite-frantic-pace*` — so harder/faster games rev the stand up more than slow
+ones, and a rally's rising baseline builds the hype. Pegged high after a point
+(the cheer). Drives how high the stand stands and how big the wave."
+  (let (pace (* (get st :base-vx) (get st :ball-mult)))
+    (max (clamp (/ (- pace *excite-calm-pace*) (- *excite-frantic-pace* *excite-calm-pace*)) 0 1)
+      (/ (get st :cheer) (max 1 *cheer-frames*)))))
 
 (defn wave-bump (cx crest)
   "How raised seat-column `cx` is by the Mexican-wave crest at `crest` — a
@@ -2368,31 +2375,48 @@ side's top-right — each counting its remaining time down."
 
 (defn damage-face (face dmg)
   "The paddle fill for damage `dmg`: its normal colour when lightly cracked, dimming
-as it worsens, and dim RED rubble once DESTROYED (`*paddle-hits-max*`)."
+a little at 2, and a hot dim-RED once DESTROYED (`*paddle-hits-max*`)."
   (if (>= dmg *paddle-hits-max*)
-    {:bg [120 48 48]}
+    {:bg [165 58 52]}
     (let ([r g b] (get face :bg)
-          d (if (>= dmg 2) 0.6 1.0))
+          d (if (>= dmg 2) 0.72 0.9))
       {:bg [(round (* r d)) (round (* g d)) (round (* b d))]})))
 
+(defn crack-ops (top px ph n)
+  "`n` jagged dark FRACTURE seams evenly spaced across a (still-solid) paddle body: a
+2-row zig — one row inset left, the next inset right — so it reads as a crack, not a
+clean cut or a see-through gap."
+  (mapcat (fn (i)
+            (let (y (+ top (round (* ph (/ (+ i 1) (+ n 1)))))
+                  s (mod (+ i 1) 2)
+                  seam {:bg [24 20 26]})
+              [[:rect y (+ px s) (- *paddle-w* s) 1 seam] [:rect (+ y 1)
+                                                            px
+                                                            (- *paddle-w* (- 1 s))
+                                                            1
+                                                            seam]]))
+    (range n)))
+
 (defn paddle-render-ops (top px ph face dmg)
-  "A paddle's draw ops for its damage: whole at 0, then splitting into more, gappier
-chunks as cracks spread (1 → 2 → …). At `*paddle-hits-max*` it's DESTROYED but stays
-VISIBLE as dim-red, x-jittered rubble (it no longer blocks) until it self-repairs."
-  (if (<= dmg 0)
-    [[:rect top px *paddle-w* ph face]]
-    (let (broken? (>= dmg *paddle-hits-max*)
-          f (damage-face face dmg)
-          ; more damage ⇒ more chunks with a 1-cell crack between each
-          segs (+ dmg 1)
-          gap 1
-          chunk (max 1 (quot (- ph (* gap (- segs 1))) segs)))
-      (map
-        (fn (i)
-          ; rubble chunks jitter sideways a cell so a broken paddle reads as debris
-          (let (jit (if broken? (- (mod (* (+ i 1) 5) 3) 1) 0))
-            [:rect (+ top (* i (+ chunk gap))) (+ px jit) *paddle-w* chunk f]))
-        (range segs)))))
+  "A paddle's draw ops for its damage level: SOLID at 0; still solid but visibly
+CRACKED — dimming, with jagged dark fracture seams — at 1..(`*paddle-hits-max*`-1);
+and DESTROYED at `*paddle-hits-max*`, where it stays VISIBLE as a hot-red paddle
+SNAPPED into offset chunks (glowing fracture lines between them, no see-through gaps)
+until it self-repairs. Never nil, never vanishes."
+  (let (w *paddle-w* body (damage-face face dmg))
+    (cond
+      (<= dmg 0) [[:rect top px w ph body]]
+      (< dmg *paddle-hits-max*) (concat [[:rect top px w ph body]] (crack-ops top px ph dmg))
+      ;; DESTROYED: three chunks slid sideways with molten-red fracture seams between
+      :else (let (ch (max 1 (quot (- ph 2) 3)))
+              (mapcat (fn (i)
+                        (let (y (+ top (* i (+ ch 1)))
+                              jit (- (mod (* (+ i 3) 7) 3) 1)
+                              chunk [:rect y (+ px jit) w ch body])
+                          (if (< i 2)
+                            [chunk [:rect (+ y ch) px w 1 {:bg [235 120 60]}]]
+                            [chunk])))
+                (range 3))))))
 
 (defn announce-ops (st cols rows)
   "The announcer callout: big bold centred text that PUNCHES in (a touch larger

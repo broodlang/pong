@@ -2696,6 +2696,9 @@ current screen-shake offset."
         r-face {:bg (paddle-color st :right *right-color*)}
         left-ops (paddle-render-ops (floor (get st :lp)) (left-x) lph l-face (get st :l-dmg))
         right-ops (paddle-render-ops (floor (get st :rp)) (right-x cols) rph r-face (get st :r-dmg))
+        ;; while counting down the ball is parked at centre — hide it and its trail so
+        ;; the spinner ring stays EMPTY; the ball only appears (at centre) on release
+        serving? (> (get st :countdown) 0)
         [dr dc] (shake-offset st)
         front (concat (wind-ops st)
                 (goal-ops cols rows)
@@ -2703,7 +2706,7 @@ current screen-shake offset."
                 (score-ops st hue)
                 (effect-indicator-ops st cols)
                 (ammo-ops st cols)
-                (trail-ops (get st :trail))
+                (if serving? nil (trail-ops (get st :trail)))
                 (particle-ops (get st :particles))
                 (token-ops st)
                 (streaker-ops st)
@@ -2715,7 +2718,7 @@ current screen-shake offset."
                 (load-bar-ops st :right)
                 (bullet-ops st)
                 (charge-aura-ops st)
-                [(ball-op st hue)]
+                (if serving? nil [(ball-op st hue)])
                 (spinner-ops st)
                 (countdown-ops st cols rows)
                 (announce-ops st cols rows)))

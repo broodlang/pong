@@ -313,11 +313,12 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 (def *crowd-tier-rise* 3)
 ;; The crowd's hype tracks the ball's on-screen PACE (`:base-vx` × `:ball-mult`):
 ;; calm at `*excite-calm-pace*` cells/frame, fully hyped (whole stand stands) at
-;; `*excite-frantic-pace*`. So a slow game (game 0 ⇒ pace ~1.6) barely stirs them,
-;; the standard game (5) whips them up as a rally's baseline climbs, and a hard/fast
-;; game (10 ⇒ pace 5.4+) keeps the stand on its feet throughout.
+;; `*excite-frantic-pace*`. The frantic threshold is low enough that hype builds
+;; QUICKLY — and since pace scales with game difficulty, a faster game reaches full
+;; excitement far sooner: a slow game (0 ⇒ pace ~1.6) barely stirs them, the standard
+;; game (5) whips up over a rally, a hard/fast game (10 ⇒ pace 5.4+) is maxed throughout.
 (def *excite-calm-pace* 2.7)
-(def *excite-frantic-pace* 4.4)
+(def *excite-frantic-pace* 3.9)
 ; shot counts at which the crowd runs a SINGLE / DOUBLE / TRIPLE Mexican wave
 (def *wave-threshold* 10)
 (def *wave-double* 20)
@@ -2839,10 +2840,12 @@ the pause menu, so nothing ever exits a match without a prompt.)"
   "Play a tone through `audio-beep`, but only when audio is compiled in (see
 `*audio?*`) — so the same source runs on a Brood built without `--features
 audio`, it just stays silent. Pass an optional peak `vol` like `audio-beep`.
+Fires the tone in a DETACHED process so `audio-beep`'s device latency (notably the
+first-call warm-up) never stalls the menu / game loop — keeping input smooth.
 (With the feature, `audio-beep` is itself a no-op when muted / no device; this
 guards the harder case where the builtin doesn't exist at all.)"
   (when *audio?*
-    (apply audio-beep freq ms vol)))
+    (spawn (fn () (apply audio-beep freq ms vol)))))
 
 (defn play-sounds! (old new)
   "Play this frame's sound effects by DIFFING the previous (`old`) and new (`new`)
@@ -2863,8 +2866,11 @@ hit and point tone stay on top.
     (do
       (when (> nr pr)
         (beep! (+ 300 (* 14 (min nr 20))) 35))
-      (when (and (> exc 0.4) (= 0 (mod (get new :t) 22)))
-        (beep! (+ 70 (* 30 exc)) 130 0.06))
+      ;; crowd murmur: a soft low hum in the LOW-MID excitement band only — it gives
+      ;; way to the roar once they're fully hyped, so a maxed (level-10 / frantic) game
+      ;; has NO murmur. Pitch + volume track the hype slightly.
+      (when (and (> exc 0.15) (< exc 0.8) (= 0 (mod (get new :t) 22)))
+        (beep! (+ 70 (* 40 exc)) 130 (* 0.05 (+ 0.6 (* 0.4 exc)))))
       (when (> (wave-count nr) (wave-count pr))
         (beep! (+ 60 (* 12 (wave-count nr))) 240 0.09))
       (when (and (> pr 0) (= nr 0))

@@ -58,19 +58,22 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ; fraction of the over-baseline pace a hit retains (momentum bleed toward baseline)
 (def *momentum-keep* 0.75)
 ;; LOADING: instead of a random timing window, a player HOLDS a load key to charge
-;; their paddle (`:l-load`/`:r-load`, 0..1). While loading the paddle moves SLOWER
-;; (down to a `*load-slow*` cut at full load), and the loaded hit ROCKETS the ball
-;; back — up to `*load-boost*`× at full charge (capped at `*charge-max*`; the ball's
-;; travel is sub-stepped so even that rocket can't tunnel). A paddle charged past
-;; `*flame-load*` catches FIRE. The AI loads too (`side-loading?`): it charges when it's
-;; defending and already sitting on the ball's arrival, so the slow-down costs it
-;; nothing. Discharges to 0 on contact — a loaded hit is a one-shot.
-; load gained per frame while the load key is held (~0.75 s to full)
-(def *load-rate* 0.022)
-; load lost per frame when NOT loading (drains faster than it builds)
-(def *load-decay* 0.06)
-; fraction of a paddle's move speed REMOVED at full load (0.7 ⇒ crawls at 30%)
-(def *load-slow* 0.7)
+;; their paddle (`:l-load`/`:r-load`, 0..1). The charge OSCILLATES — it rises to full
+;; then falls back and ping-pongs (`load-step`), so you can't just hold at max, you
+;; must catch the PEAK. While loading the paddle moves SLOWER (down to a `*load-slow*`
+;; cut at full charge), and the loaded hit ROCKETS the ball back — up to `*load-boost*`×
+;; at full charge (capped at `*charge-max*`; the ball's travel is sub-stepped so even
+;; that rocket can't tunnel). A paddle charged past `*flame-load*` catches FIRE. The AI
+;; loads too (`side-loading?` / `ai-load-plan`): it TIMES the charge so its peak lands
+;; on the ball's arrival — near-perfect at high difficulty, mistimed (or skipped) at low
+;; — and only when already in position, so the slow-down never costs it a save.
+;; Discharges to 0 on contact — a loaded hit is a one-shot.
+; load gained per frame while charging (~0.4 s to full — quick)
+(def *load-rate* 0.04)
+; load lost per frame when NOT loading (drains fast on release)
+(def *load-decay* 0.08)
+; fraction of a paddle's move speed REMOVED at full load (0.8 ⇒ crawls at 20%)
+(def *load-slow* 0.8)
 ; ×ball-speed on a FULL-load hit (interpolated down to 1× at zero load) — a big kick
 (def *load-boost* 2.3)
 ; a hit at/above this load counts as LOADED: fires the glow + LOADED! callout
@@ -782,7 +785,9 @@ back to the middle (5). The `2.4` aim top is calibrated (defence sim) so:
         lerp (fn (lo hi) (+ lo (* t (- hi lo)))))
     {:ai-speed-mult (lerp 0.4 3.0)
      :ai-return-mult (lerp 0.35 2.6)
-     :ai-aim-mult (lerp 2.4 0.0)}))
+     :ai-aim-mult (lerp 2.4 0.0)
+     ;; how well the AI TIMES its load: 0 (mistimed, often skips) → 1 (peaks perfectly)
+     :ai-load-skill (lerp 0.0 1.0)}))
 
 (defn game-params (level)
   "The GAME-difficulty multipliers for `level` (0–10) — the pace-and-chaos dial,
@@ -906,28 +911,64 @@ court, and hitting a wall kills the drift."
         top (clamp raw 0 (- rows ph)))
     [top (if (= top raw) vel1 0)]))
 
+(defn ai-load-plan (st side)
+  "The AI's load PLAN for `side`'s current approach: a target charge to reach at
+contact, or 0 for 'don't load this rally'. Seeded by the rally count + a stable
+`:seed0` so it holds for the whole approach and re-rolls each rally. Skill
+(`:ai-load-skill`, 0→1 with difficulty) drives both how OFTEN it bothers and how
+close to a full peak it aims — a high-skill AI almost always goes for ~1.0, a low one
+often skips and, when it does load, aims at a mistimed 0.2–0.8."
+  (let (skill (get st :ai-load-skill)
+        salt (if (= side :left) 101 202)
+        ; burn the first draw: rand-float's initial value is correlated for the
+        ; structured (seed0 + rally·k + salt) seeds, which would bias the roll
+        [_ s0] (rand-float (+ (get st :seed0) (* (get st :rally) 7919) salt))
+        [a s1] (rand-float s0)
+        [b _] (rand-float s1))
+    (if (>= a (+ 0.35 (* 0.65 skill)))
+      0
+      (+ (* (- 1 skill) (+ 0.2 (* b 0.6))) skill))))
+
 (defn side-loading? (st side defend ph paddle-top rows)
-  "Does `side` want to LOAD its paddle this frame? Never while it's DESTROYED (it
-can't hit). Otherwise a HUMAN loads while its load key is held (`:l-loading`/
-`:r-loading`); an AI loads only while it's DEFENDING and already sitting within
-`*ai-load-window*` of the ball's predicted arrival — so the load slow-down never
-costs it a save, but the return still comes back hot."
+  "Does `side` want to LOAD its paddle this frame? Never while DESTROYED (it can't
+hit). A HUMAN loads while its load key is held (`:l-loading`/`:r-loading`) — the meter
+then ping-pongs, so they must catch the peak. An AI loads only while DEFENDING, already
+in position (within `*ai-load-window*` of the ball's arrival — so the slow-down never
+costs it a save), and once the ball is close enough that charging from now reaches its
+`ai-load-plan` target right as the ball arrives (charge rises `*load-rate*`/frame, so
+that's `target / *load-rate*` frames out)."
   (cond
     (paddle-broken? st side) false
     (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (get st
                                                           (side-key side :l-loading :r-loading))
-    :else (and defend
-            (let (bias (get st (side-key side :le :re))
-                  target (+ (predict-center st side rows) bias)
-                  pc (+ paddle-top (/ ph 2)))
-              (< (abs (- target pc)) (* ph *ai-load-window*))))))
+    (not defend) false
+    :else (let (arrival (predict-center st side rows)
+                pc (+ paddle-top (/ ph 2))
+                plan (ai-load-plan st side)
+                vx (get st :vx)
+                plane (if (= side :left) (+ (left-x) *paddle-w*) (right-x (get st :cols)))
+                frames (if (= vx 0) 9999 (/ (abs (- (get st :bx) plane)) (abs vx)))
+                ;; a SKILLED AI only loads when safely in position (a tight window — it
+                ;; bears in mind the slow-down); as skill → 0 the window blows up, so a
+                ;; low-skill AI loads RECKLESSLY (on timing alone, well out of position)
+                ;; and the slow-down then costs it the save — a mistimed shot that whiffs
+                window (/ (* ph *ai-load-window*) (max 0.12 (get st :ai-load-skill))))
+            (and (> plan 0)
+              (< (abs (- arrival pc)) window)
+              (<= frames (/ plan *load-rate*))))))
 
-(defn load-step (cur loading?)
-  "Advance a paddle's load one frame: build toward 1 by `*load-rate*` while
-`loading?`, else drain toward 0 by `*load-decay*`."
+(defn load-step (cur dir loading?)
+  "Advance a paddle's load one frame, returning `[load' dir']` (`dir` +1 rising / -1
+falling). While `loading?` the charge OSCILLATES: it rises by `*load-rate*` to full
+(1.0) then reverses and falls to 0, ping-ponging — you can't hold at max, you must
+catch the peak. Released, it drains by `*load-decay*` toward 0 (direction reset)."
   (if loading?
-    (min 1.0 (+ cur *load-rate*))
-    (max 0.0 (- cur *load-decay*))))
+    (let (n (+ cur (* dir *load-rate*)))
+      (cond
+        (>= n 1.0) [1.0 -1]
+        (<= n 0.0) [0.0 1]
+        :else [n dir]))
+    [(max 0.0 (- cur *load-decay*)) 1]))
 
 (defn move-ai (st)
   "Advance both paddles one frame. Each side is moved by `human-step` (with inertia)
@@ -948,11 +989,13 @@ is FROZEN (it holds position, zero velocity). Also builds/drains each paddle's L
         l-human (= (get st0 :l-ctrl) :human)
         r-human (= (get st0 :r-ctrl) :human)
         ;; charge/drain LOAD first, then move (movement reads it via `side-speed`)
-        st1 (assoc st0
-              :l-load (load-step (get st0 :l-load)
-                        (side-loading? st0 :left l-defend lph (get st0 :lp) rows))
-              :r-load (load-step (get st0 :r-load)
-                        (side-loading? st0 :right r-defend rph (get st0 :rp) rows))))
+        [l-load l-dir] (load-step (get st0 :l-load)
+                         (get st0 :l-load-dir)
+                         (side-loading? st0 :left l-defend lph (get st0 :lp) rows))
+        [r-load r-dir] (load-step (get st0 :r-load)
+                         (get st0 :r-load-dir)
+                         (side-loading? st0 :right r-defend rph (get st0 :rp) rows))
+        st1 (assoc st0 :l-load l-load :l-load-dir l-dir :r-load r-load :r-load-dir r-dir))
     (let (l-move (cond
                    l-frozen [(get st1 :lp) 0]
                    l-human (human-step st1 :left lph (get st1 :lp) rows)
@@ -1101,6 +1144,7 @@ that paddle's load to 0, deflect, bump the RALLY counter, fire callouts, and
 `contact` with intensity that BUILDS with the rally. A loaded hit (`*load-hit-min*`+)
 gets its own louder callout + shake + the charge glow."
   (let (loadk (side-key (get st :owner) :l-load :r-load)
+        dirk (side-key (get st :owner) :l-load-dir :r-load-dir)
         load (get st loadk)
         loaded? (>= load *load-hit-min*)
         r (+ (get st :rally) 1)
@@ -1115,6 +1159,7 @@ gets its own louder callout + shake + the charge glow."
                     :rally r
                     :base-vx base
                     loadk 0
+                    dirk 1
                     :charge-glow (if loaded? *charge-glow-frames* (get st :charge-glow)))
         announced (if loaded?
                     (announce deflected "LOADED!" (get deflected :hue) *announce-life*)
@@ -2008,11 +2053,16 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :r-shoot false
        :l-load 0
        :r-load 0
+       :l-load-dir 1
+       :r-load-dir 1
        :l-loading false
        :r-loading false
        :ai-speed-mult (get diff :ai-speed-mult)
        :ai-return-mult (get diff :ai-return-mult)
        :ai-aim-mult (get diff :ai-aim-mult)
+       :ai-load-skill (get diff :ai-load-skill)
+       ;; stable per-match seed for the AI's per-rally load plan (never mutated)
+       :seed0 s
        :ball-mult (get game :ball-mult)
        :powerup-mult (get game :powerup-mult)
        :win-score (get config :points)

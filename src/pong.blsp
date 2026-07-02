@@ -733,7 +733,22 @@ so the tint sums up what's on it."
       (blend-rgbs (cons base
                     (map (fn (e) (hsv->rgb (if (get e :good?) *good-hue* *bad-hue*) 0.85 1.0)) fx))))))
 
-;; ---- the AI players ----
+;; ==== THE AI, IN LAYERS ====
+;; Each concern is its own function, composed by `move-ai` one frame at a time:
+;;   SKILL       `difficulty-params` — the per-level dials (defend/return speed, aim
+;;               error, load skill, perfect-release odds).
+;;   PERCEPTION  `predict-center` (the ball's bounce-folded arrival row) and
+;;               `bullet-threat` (the nearest incoming shot).
+;;   AIM         `reroll-aim` — the per-paddle bias that is the SOLE deliberate-miss
+;;               source; it shrinks to zero at the top difficulty.
+;;   MOVEMENT    `ai-side-top` decides the target (defend the arrival, else recentre /
+;;               `paddle-target` juke a bullet) and speed, then `ai-track` steps toward
+;;               it capped — so a sharp return can still beat the paddle.
+;;   CHARGING    `ai-load-plan` picks a per-rally load target; `ai-charge?` says WHEN to
+;;               charge so the peak lands on arrival, bearing in mind the slow-down.
+;;   TIMING      the perfect-release roll (`:ai-timing`, in `paddle-hit`) and the shoot
+;;               trigger (`opp-defending?`) live beside their subsystems.
+;; ---- movement primitive + perception ----
 (defn ai-track (paddle-top target-center rows ph speed)
   "The next top position for a paddle of height `ph` at `paddle-top` whose centre
 should move toward `target-center`, at most `speed` rows this frame, staying fully
@@ -840,7 +855,7 @@ Used at kick-off and after a point."
       ; fresh serve: nobody has hit the ball yet, so no powerup pickups
       :s s2)))
 
-;; ---- one physics tick ----
+;; ---- AI aim, movement & charging decisions ----
 (defn reroll-aim (st)
   "Re-roll each paddle's aim bias (`:le`/`:re`, rows) to a fresh value in
 `[-e, e]` where `e` is `*aim-error*` paddle-heights, threading the PRNG. Called
@@ -938,33 +953,35 @@ often skips and, when it does load, aims at a mistimed 0.2–0.8."
       0
       (+ (* (- 1 skill) (+ 0.2 (* b 0.6))) skill))))
 
+(defn ai-charge? (st side ph paddle-top rows)
+  "Whether an AI `side` (already DEFENDING) should CHARGE its load this frame. It
+commits to its per-rally `ai-load-plan` target and only charges once the ball is close
+enough that the rise peaks on arrival — `target / *load-rate*` frames out (charge climbs
+`*load-rate*`/frame) — AND it's in position. The position window is TIGHT for a skilled
+AI (it bears in mind the slow-down), but blows up as skill → 0, so a weak AI charges
+RECKLESSLY out of position and the slow-down then costs it the save (a mistimed whiff)."
+  (let (plan (ai-load-plan st side)
+        arrival (predict-center st side rows)
+        pc (+ paddle-top (/ ph 2))
+        vx (get st :vx)
+        plane (if (= side :left) (+ (left-x) *paddle-w*) (right-x (get st :cols)))
+        frames (if (= vx 0) 9999 (/ (abs (- (get st :bx) plane)) (abs vx)))
+        window (/ (* ph *ai-load-window*) (max 0.12 (get st :ai-load-skill))))
+    (and (> plan 0)
+      (< (abs (- arrival pc)) window)
+      (<= frames (/ plan *load-rate*)))))
+
 (defn side-loading? (st side defend ph paddle-top rows)
-  "Does `side` want to LOAD its paddle this frame? Never while DESTROYED (it can't
-hit). A HUMAN loads while its load key is held (`:l-loading`/`:r-loading`) — the meter
-then ping-pongs, so they must catch the peak. An AI loads only while DEFENDING, already
-in position (within `*ai-load-window*` of the ball's arrival — so the slow-down never
-costs it a save), and once the ball is close enough that charging from now reaches its
-`ai-load-plan` target right as the ball arrives (charge rises `*load-rate*`/frame, so
-that's `target / *load-rate*` frames out)."
+  "Does `side` want to charge its load this frame? Never while DESTROYED (it can't hit).
+A HUMAN charges while its load key is held (`:l-loading`/`:r-loading`) — the meter then
+ping-pongs, so it must catch the peak. An AI (only while DEFENDING) defers to
+`ai-charge?`."
   (cond
     (paddle-broken? st side) false
     (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (get st
                                                           (side-key side :l-loading :r-loading))
     (not defend) false
-    :else (let (arrival (predict-center st side rows)
-                pc (+ paddle-top (/ ph 2))
-                plan (ai-load-plan st side)
-                vx (get st :vx)
-                plane (if (= side :left) (+ (left-x) *paddle-w*) (right-x (get st :cols)))
-                frames (if (= vx 0) 9999 (/ (abs (- (get st :bx) plane)) (abs vx)))
-                ;; a SKILLED AI only loads when safely in position (a tight window — it
-                ;; bears in mind the slow-down); as skill → 0 the window blows up, so a
-                ;; low-skill AI loads RECKLESSLY (on timing alone, well out of position)
-                ;; and the slow-down then costs it the save — a mistimed shot that whiffs
-                window (/ (* ph *ai-load-window*) (max 0.12 (get st :ai-load-skill))))
-            (and (> plan 0)
-              (< (abs (- arrival pc)) window)
-              (<= frames (/ plan *load-rate*))))))
+    :else (ai-charge? st side ph paddle-top rows)))
 
 (defn load-step (cur dir loading? locked?)
   "Advance a paddle's load one frame, returning `[load' dir']` (`dir` +1 rising / -1
@@ -981,52 +998,51 @@ it drains by `*load-decay*` toward 0 (direction reset)."
     locked? [cur dir]
     :else [(max 0.0 (- cur *load-decay*)) 1]))
 
+(defn step-load (st side defend ph paddle-top rows)
+  "Advance `side`'s load one frame (via `side-loading?` + `load-step`), returning `st`
+with its `:*-load` / `:*-load-dir` updated. Runs before the paddle moves, since
+`side-speed` reads the load to apply the charge slow-down."
+  (let ([load dir] (load-step (get st (side-key side :l-load :r-load))
+                     (get st (side-key side :l-load-dir :r-load-dir))
+                     (side-loading? st side defend ph paddle-top rows)
+                     (get st (side-key side :l-locked? :r-locked?))))
+    (assoc st (side-key side :l-load :r-load) load (side-key side :l-load-dir :r-load-dir) dir)))
+
+(defn paddle-move (st side ph paddle-top rows defend frozen?)
+  "The next `[top vel]` for `side` this frame: a FROZEN paddle (streaker-splatted or
+destroyed) holds still; a HUMAN moves with inertia (`human-step`); an AI tracks the
+ball crisply (`ai-side-top`, zero inertia — so the difficulty curve stays calibrated)."
+  (cond
+    frozen? [paddle-top 0]
+    (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (human-step st side ph paddle-top rows)
+    :else [(ai-side-top st side ph paddle-top rows defend) 0]))
+
 (defn move-ai (st)
-  "Advance both paddles one frame. Each side is moved by `human-step` (with inertia)
-or `ai-side-top` per its controller, except a paddle a streaker splatted or destroyed
-is FROZEN (it holds position, zero velocity). Also builds/drains each paddle's LOAD
-(which slows its move; see `side-speed`) and re-rolls the AI aim bias periodically."
+  "One frame of paddle motion for BOTH sides: re-roll the AI aim bias on its period,
+charge/drain each load (`step-load`), then move each paddle (`paddle-move`). Advances
+the frame counter and thaws the streaker-freeze timers."
   (let (st0 (if (= 0 (mod (get st :t) *aim-period*)) (reroll-aim st) st)
         rows (get st0 :rows)
         lph (side-ph st0 :left rows)
         rph (side-ph st0 :right rows)
-        vx (get st0 :vx)
-        ; ball heading left ⇒ the left paddle must defend
-        l-defend (< vx 0)
-        r-defend (> vx 0)
-        ;; a streaker-splatted OR destroyed paddle is FROZEN — it holds position
+        ; ball heading left ⇒ the left paddle defends (and vice-versa)
+        l-defend (< (get st0 :vx) 0)
+        r-defend (> (get st0 :vx) 0)
         l-frozen (or (> (get st0 :l-frozen) 0) (paddle-broken? st0 :left))
         r-frozen (or (> (get st0 :r-frozen) 0) (paddle-broken? st0 :right))
-        l-human (= (get st0 :l-ctrl) :human)
-        r-human (= (get st0 :r-ctrl) :human)
-        ;; charge/drain LOAD first, then move (movement reads it via `side-speed`)
-        [l-load l-dir] (load-step (get st0 :l-load)
-                         (get st0 :l-load-dir)
-                         (side-loading? st0 :left l-defend lph (get st0 :lp) rows)
-                         (get st0 :l-locked?))
-        [r-load r-dir] (load-step (get st0 :r-load)
-                         (get st0 :r-load-dir)
-                         (side-loading? st0 :right r-defend rph (get st0 :rp) rows)
-                         (get st0 :r-locked?))
-        st1 (assoc st0 :l-load l-load :l-load-dir l-dir :r-load r-load :r-load-dir r-dir))
-    (let (l-move (cond
-                   l-frozen [(get st1 :lp) 0]
-                   l-human (human-step st1 :left lph (get st1 :lp) rows)
-                   :else [(ai-side-top st1 :left lph (get st1 :lp) rows l-defend) 0])
-          r-move (cond
-                   r-frozen [(get st1 :rp) 0]
-                   r-human (human-step st1 :right rph (get st1 :rp) rows)
-                   :else [(ai-side-top st1 :right rph (get st1 :rp) rows r-defend) 0])
-          [ltop lvel] l-move
-          [rtop rvel] r-move)
-      (assoc st1
-        :t (+ (get st1 :t) 1)
-        :l-frozen (max 0 (- (get st1 :l-frozen) 1))
-        :r-frozen (max 0 (- (get st1 :r-frozen) 1))
-        :lp ltop
-        :l-vel lvel
-        :rp rtop
-        :r-vel rvel))))
+        ;; charge each load first (movement reads it via `side-speed`)
+        stl (step-load st0 :left l-defend lph (get st0 :lp) rows)
+        st1 (step-load stl :right r-defend rph (get stl :rp) rows)
+        [ltop lvel] (paddle-move st1 :left lph (get st1 :lp) rows l-defend l-frozen)
+        [rtop rvel] (paddle-move st1 :right rph (get st1 :rp) rows r-defend r-frozen))
+    (assoc st1
+      :t (+ (get st1 :t) 1)
+      :l-frozen (max 0 (- (get st1 :l-frozen) 1))
+      :r-frozen (max 0 (- (get st1 :r-frozen) 1))
+      :lp ltop
+      :l-vel lvel
+      :rp rtop
+      :r-vel rvel)))
 
 (defn overlap? (by paddle-top ph)
   "Does the ball (top `by`, height `*ball-h*`) vertically overlap a paddle

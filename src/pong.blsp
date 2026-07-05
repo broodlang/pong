@@ -18,6 +18,12 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; ~doubled against vertical ones to read as square / isotropic on screen.
 ; ~60 fps target between physics steps (the `(after)` period)
 (def *frame-ms* 16)
+;; FIXED TIMESTEP: the sim always advances one `step` per `*frame-ms*` of REAL time,
+;; not one step per rendered frame — so a slow/heavy frame (render spike, GC pause)
+;; runs several catch-up ticks instead of moving the ball less. That keeps game speed
+;; constant regardless of frame-rate (no slow-motion, no ball-speed jitter). Capped at
+;; `*max-catchup*` ticks per wake so a long stall can't unleash a burst / death-spiral.
+(def *max-catchup* 5)
 ;; The window uses a SMALL cell font (`*cell-px*`), so a cell is only a few
 ;; pixels: the ball/paddles are `floor`'d to whole cells, and a smaller cell
 ;; means a finer quantum and visibly smoother motion (the brood-life trick).
@@ -141,11 +147,13 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; rather than stopping dead. Gives the paddle weight without feeling sluggish.
 (def *paddle-accel* 0.7)
 (def *paddle-friction* 0.8)
-;; the acceleration EASES IN: it starts at a fraction of `*paddle-accel*` and climbs
-;; to full over `*paddle-ramp*` held frames (tracked per side in `:l-hold`/`:r-hold`),
-;; so a tap nudges the paddle gently and a sustained hold builds to full speed. Reset
-;; when the key is released or the direction reversed.
-(def *paddle-ramp* 30)
+;; the acceleration EASES IN: it starts at `*paddle-accel-min*` of `*paddle-accel*`
+;; and climbs to full over `*paddle-ramp*` held frames (tracked per side in
+;; `:l-hold`/`:r-hold`), so a tap starts gently and a sustained hold builds to full
+;; thrust — but it must stay RESPONSIVE, so the ramp is short and never starts near
+;; zero (or the paddle can't chase the ball). Reset on release / direction reversal.
+(def *paddle-ramp* 10)
+(def *paddle-accel-min* 0.45)
 ;; ---- COLOUR & FX ----------------------------------------------------------
 ;; Everything rainbows: a global `:hue` advances `*hue-step*` degrees per frame,
 ;; and the ball, paddles, net and trail derive their colour from it (so the whole
@@ -949,7 +957,11 @@ court, and hitting a wall kills the drift."
                 (= dir 0) 0
                 reversing? 1
                 :else (+ hold 1))
-        accel (* *paddle-accel* (min 1.0 (/ hold1 *paddle-ramp*)))
+        ;; ease from `*paddle-accel-min*` of full thrust up to full over the ramp —
+        ;; the floor keeps the paddle responsive from the very first frame
+        accel (* *paddle-accel*
+                (+ *paddle-accel-min*
+                  (* (- 1 *paddle-accel-min*) (min 1.0 (/ hold1 *paddle-ramp*)))))
         vel1 (if (= dir 0)
                (* vel *paddle-friction*)
                (clamp (+ vel (* dir accel)) (- 0 maxv) maxv))
@@ -3035,6 +3047,25 @@ frame's work took (so motion doesn't speed up / drift when a frame is cheap)."
 pause (so resuming doesn't fire a burst of catch-up ticks)."
   (+ (now-ns) (* *frame-ms* 1000000)))
 
+(defn advance-frame--acc (st deadline frame-ns now n)
+  (cond
+    ;; a match-ending tick stops the catch-up immediately (win-loop takes over)
+    (get st :winner) [st deadline]
+    ;; caught up to real time (always run at least the one tick we woke for)
+    (and (> n 0) (> deadline now)) [st deadline]
+    ;; safety cap: after a long stall, stop and resync rather than burst-spiral
+    (>= n *max-catchup*) [st (+ now frame-ns)]
+    :else (advance-frame--acc (play-sounds! st (step st))
+            (+ deadline frame-ns) frame-ns now (+ n 1))))
+
+(defn advance-frame (st deadline)
+  "Advance the FIXED-TIMESTEP world to catch up to real time: run one `step` per
+`*frame-ms*` elapsed past `deadline` (at least one), capped at `*max-catchup*`.
+Returns `[st' next-deadline]`. This decouples game SPEED from render frame-rate — a
+slow frame runs extra ticks instead of moving the ball less — so the ball never
+appears to slow down or its speed jitter when frames run long."
+  (advance-frame--acc st deadline (* *frame-ms* 1000000) (now-ns) 0))
+
 (defn pause-trigger? (m)
   "Does keypress `m` request a PAUSE — Esc or q? (Neither quits outright; both open
 the pause menu, so nothing ever exits a match without a prompt.)"
@@ -3119,8 +3150,8 @@ without redrawing costs no responsiveness."
 refits and bounces back to `loop` (which redraws at the new size), Esc / q open the
 PAUSE menu (never a silent quit), the window's X / Ctrl-C tear down, a paddle key
 press / `[:key-up]` release steers a human paddle and re-parks (no redraw — the
-paddle hasn't moved yet), and the `(after)` timeout advances one physics tick and
-draws the result via `loop`."
+paddle hasn't moved yet), and the `(after)` timeout advances the physics (one or more
+catch-up ticks via `advance-frame`) and draws the result via `loop`."
   (receive
     ([:resize cols rows] (loop w (refit st cols rows) deadline))
     ([:key-up k] (loop-wait w (release-key st k) deadline))
@@ -3129,10 +3160,10 @@ draws the result via `loop`."
          (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
          :else (loop-wait w (press-key st m) deadline)))
     (after (wait-ms deadline)
-      (let (st2 (play-sounds! st (step st)))
+      (let ([st2 deadline2] (advance-frame st deadline))
         (if (get st2 :winner)
-          (win-loop w st2 0 0 (next-deadline deadline))
-          (loop w st2 (next-deadline deadline)))))))
+          (win-loop w st2 0 0 deadline2)
+          (loop w st2 deadline2))))))
 
 ;; ---- the pause menu (Esc / q) ----
 (defn pause-options ()

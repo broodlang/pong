@@ -24,6 +24,10 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; constant regardless of frame-rate (no slow-motion, no ball-speed jitter). Capped at
 ;; `*max-catchup*` ticks per wake so a long stall can't unleash a burst / death-spiral.
 (def *max-catchup* 5)
+;; the background crowd is re-rendered (and its op-list reallocated) only once every
+;; this many ticks — reused verbatim in between (a lower crowd animation rate is
+;; invisible for a backdrop). Kept low since it's not the dominant allocator.
+(def *crowd-refresh* 2)
 ;; The window uses a SMALL cell font (`*cell-px*`), so a cell is only a few
 ;; pixels: the ball/paddles are `floor`'d to whole cells, and a smaller cell
 ;; means a finer quantum and visibly smoother motion (the brood-life trick).
@@ -2023,12 +2027,13 @@ reads during the pause."
     :announce-life (max 0 (- (get st :announce-life) 1))))
 
 (defn refresh-crowd (st)
-  "Rebuild the cached crowd op-list (`:crowd-ops`) every OTHER tick and reuse it
-verbatim in between. The stand is background eye-candy, so animating it at ~30fps is
-invisible — but rebuilding 160 seats (2–3 HSV colours each) is the render loop's
-single biggest cost and allocator, so halving it cuts frame-time spikes / GC churn
-(the source of motion jitter). `refit` clears the cache when the court is resized."
-  (if (and (get st :crowd-ops) (= 1 (mod (get st :t) 2)))
+  "Rebuild the cached crowd op-list (`:crowd-ops`) once every `*crowd-refresh*` ticks
+and reuse it verbatim in between. The stand is background eye-candy, so animating it
+at a lower rate is invisible — but rebuilding 160 seats (2–3 HSV colours each) is the
+render loop's single biggest allocator, and doing it in one burst churns the GC into a
+collection soon after; refreshing less often cuts that GC-driven frame-time jitter.
+`refit` clears the cache when the court is resized."
+  (if (and (get st :crowd-ops) (not (= 0 (mod (get st :t) *crowd-refresh*))))
     st
     (assoc st :crowd-ops (crowd-ops st (get st :cols) (get st :rows)))))
 
@@ -3134,9 +3139,17 @@ event. Coupling redraws to keystrokes is what made player-vs-player jitter: two
 humans holding keys flood the loop with input, and each re-render of the (heavy)
 `render` op-vector churns allocation between ticks. Key presses only flip paddle
 direction / shoot flags; nothing visible moves until the next `step`, so re-parking
-without redrawing costs no responsiveness."
+without redrawing costs no responsiveness.
+
+After drawing, we force a small GC while there's frame slack. Left to itself the
+copying collector fires only when a frame's allocations have piled up to its
+threshold (~every 12 frames), and that catch-up collection costs ~6ms — a periodic
+stutter. Collecting EVERY frame keeps each one tiny (a fraction of a ms — the cost
+scales with garbage since the last collect, not with the live set), trading the lumpy
+6ms hitch for an even, negligible tax. Smooths the motion the auto-GC was jittering."
   (do
     (gui-draw w (render st))
+    (gc-collect)
     (loop-wait w st deadline)))
 
 (defn loop-wait (w st deadline)

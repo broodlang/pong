@@ -141,6 +141,11 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; rather than stopping dead. Gives the paddle weight without feeling sluggish.
 (def *paddle-accel* 0.7)
 (def *paddle-friction* 0.8)
+;; the acceleration EASES IN: it starts at a fraction of `*paddle-accel*` and climbs
+;; to full over `*paddle-ramp*` held frames (tracked per side in `:l-hold`/`:r-hold`),
+;; so a tap nudges the paddle gently and a sustained hold builds to full speed. Reset
+;; when the key is released or the direction reversed.
+(def *paddle-ramp* 30)
 ;; ---- COLOUR & FX ----------------------------------------------------------
 ;; Everything rainbows: a global `:hue` advances `*hue-step*` degrees per frame,
 ;; and the ball, paddles, net and trail derive their colour from it (so the whole
@@ -927,20 +932,30 @@ bias and that defend/retreat asymmetry are what make the AI beatable."
       (side-speed st side base))))
 
 (defn human-step (st side ph paddle-top rows)
-  "Next `[top vel]` for a HUMAN paddle on `side`: its held direction (`:l-dir`/
-`:r-dir`) ACCELERATES the paddle by `*paddle-accel*` up to its max speed (`*human-
-speed*` scaled by the same powerups/cheer/load the AI feels); releasing lets it
-DRIFT — velocity decays by `*paddle-friction*` so it coasts to a stop. Clamped on
+  "Next `[top vel hold]` for a HUMAN paddle on `side`: its held direction (`:l-dir`/
+`:r-dir`) ACCELERATES the paddle up to its max speed (`*human-speed*` scaled by the
+same powerups/cheer/load the AI feels). The acceleration EASES IN — starting gentle
+and climbing to full `*paddle-accel*` over `*paddle-ramp*` held frames (`hold`) — so a
+tap only nudges and a sustained hold builds up. Releasing lets it DRIFT (velocity
+decays by `*paddle-friction*`); releasing or reversing resets the ease-in. Clamped on
 court, and hitting a wall kills the drift."
   (let (dir (if (= side :left) (get st :l-dir) (get st :r-dir))
         vel (get st (side-key side :l-vel :r-vel))
+        hold (get st (side-key side :l-hold :r-hold))
         maxv (side-speed st side *human-speed*)
+        ;; restart the ramp when idle or reversing direction, else keep climbing
+        reversing? (and (not (= vel 0)) (not (= (if (> vel 0) 1 -1) dir)))
+        hold1 (cond
+                (= dir 0) 0
+                reversing? 1
+                :else (+ hold 1))
+        accel (* *paddle-accel* (min 1.0 (/ hold1 *paddle-ramp*)))
         vel1 (if (= dir 0)
                (* vel *paddle-friction*)
-               (clamp (+ vel (* dir *paddle-accel*)) (- 0 maxv) maxv))
+               (clamp (+ vel (* dir accel)) (- 0 maxv) maxv))
         raw (+ paddle-top vel1)
         top (clamp raw 0 (- rows ph)))
-    [top (if (= top raw) vel1 0)]))
+    [top (if (= top raw) vel1 0) hold1]))
 
 (defn ai-load-plan (st side)
   "The AI's load PLAN for `side`'s current approach: a target charge to reach at
@@ -1007,22 +1022,35 @@ it drains by `*load-decay*` toward 0 (direction reset)."
 
 (defn step-load (st side defend ph paddle-top rows)
   "Advance `side`'s load one frame (via `side-loading?` + `load-step`), returning `st`
-with its `:*-load` / `:*-load-dir` updated. Runs before the paddle moves, since
-`side-speed` reads the load to apply the charge slow-down."
-  (let ([load dir] (load-step (get st (side-key side :l-load :r-load))
-                     (get st (side-key side :l-load-dir :r-load-dir))
-                     (side-loading? st side defend ph paddle-top rows)
-                     (get st (side-key side :l-locked? :r-locked?))))
-    (assoc st (side-key side :l-load :r-load) load (side-key side :l-load-dir :r-load-dir) dir)))
+with its `:*-load` / `:*-load-dir` (and `:*-locked?`) updated. Runs before the paddle
+moves, since `side-speed` reads the load to apply the charge slow-down. A HUMAN that
+MOVES without holding its load key DUMPS the charge on the spot — the boost only
+survives while you hold the key or hold position (you can't bank it and then reposition)."
+  (let (loading? (side-loading? st side defend ph paddle-top rows)
+        human? (= (get st (side-key side :l-ctrl :r-ctrl)) :human)
+        moving? (or (not (= 0 (get st (side-key side :l-dir :r-dir))))
+                  (> (abs (get st (side-key side :l-vel :r-vel))) 0.3))
+        dump? (and human? moving? (not loading?))
+        [load dir] (if dump?
+                     [0.0 1]
+                     (load-step (get st (side-key side :l-load :r-load))
+                       (get st (side-key side :l-load-dir :r-load-dir))
+                       loading?
+                       (get st (side-key side :l-locked? :r-locked?)))))
+    (assoc st
+      (side-key side :l-load :r-load) load
+      (side-key side :l-load-dir :r-load-dir) dir
+      (side-key side :l-locked? :r-locked?) (if dump? false (get st (side-key side :l-locked? :r-locked?))))))
 
 (defn paddle-move (st side ph paddle-top rows defend frozen?)
-  "The next `[top vel]` for `side` this frame: a FROZEN paddle (streaker-splatted or
-destroyed) holds still; a HUMAN moves with inertia (`human-step`); an AI tracks the
-ball crisply (`ai-side-top`, zero inertia — so the difficulty curve stays calibrated)."
+  "The next `[top vel hold]` for `side` this frame (`hold` is the human ease-in frame
+count, 0 for AI/frozen): a FROZEN paddle (streaker-splatted or destroyed) holds still;
+a HUMAN moves with inertia (`human-step`); an AI tracks the ball crisply (`ai-side-top`,
+zero inertia — so the difficulty curve stays calibrated)."
   (cond
-    frozen? [paddle-top 0]
+    frozen? [paddle-top 0 0]
     (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (human-step st side ph paddle-top rows)
-    :else [(ai-side-top st side ph paddle-top rows defend) 0]))
+    :else [(ai-side-top st side ph paddle-top rows defend) 0 0]))
 
 (defn move-ai (st)
   "One frame of paddle motion for BOTH sides: re-roll the AI aim bias on its period,
@@ -1040,16 +1068,18 @@ the frame counter and thaws the streaker-freeze timers."
         ;; charge each load first (movement reads it via `side-speed`)
         stl (step-load st0 :left l-defend lph (get st0 :lp) rows)
         st1 (step-load stl :right r-defend rph (get stl :rp) rows)
-        [ltop lvel] (paddle-move st1 :left lph (get st1 :lp) rows l-defend l-frozen)
-        [rtop rvel] (paddle-move st1 :right rph (get st1 :rp) rows r-defend r-frozen))
+        [ltop lvel lhold] (paddle-move st1 :left lph (get st1 :lp) rows l-defend l-frozen)
+        [rtop rvel rhold] (paddle-move st1 :right rph (get st1 :rp) rows r-defend r-frozen))
     (assoc st1
       :t (+ (get st1 :t) 1)
       :l-frozen (max 0 (- (get st1 :l-frozen) 1))
       :r-frozen (max 0 (- (get st1 :r-frozen) 1))
       :lp ltop
       :l-vel lvel
+      :l-hold lhold
       :rp rtop
-      :r-vel rvel)))
+      :r-vel rvel
+      :r-hold rhold)))
 
 (defn overlap? (by paddle-top ph)
   "Does the ball (top `by`, height `*ball-h*`) vertically overlap a paddle
@@ -2115,6 +2145,8 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :r-dir 0
        :l-vel 0
        :r-vel 0
+       :l-hold 0
+       :r-hold 0
        :l-shoot false
        :r-shoot false
        :l-load 0

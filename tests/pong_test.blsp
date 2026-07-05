@@ -283,23 +283,25 @@
               :l-load))))))
 
 (describe "human paddle inertia"
-  (test "a held key accelerates: velocity ramps up frame over frame"
+  (test "a held key eases in: it starts gently and the acceleration grows as it's held"
     (let (st (assoc (init 200 120 7 {:mode :pve :difficulty 5 :game 5 :points 11})
                :l-dir 1
                :l-vel 0
+               :l-hold 0
                :lp 20)
           ph (side-ph st :left (get st :rows))
-          [t1 v1] (human-step st :left ph 20 (get st :rows))
-          [_ v2] (human-step (assoc st :l-vel v1) :left ph t1 (get st :rows)))
-      (is (> v1 0))
-      (is (> v2 v1))))
+          [t1 v1 h1] (human-step st :left ph 20 (get st :rows))
+          [_ v2 _] (human-step (assoc st :l-vel v1 :l-hold h1) :left ph t1 (get st :rows)))
+      (is (> v1 0))                    ; it starts moving
+      (is (> v2 v1))                   ; and keeps speeding up
+      (is (> (- v2 v1) v1))))          ; the 2nd frame gains MORE than the 1st (ease-in)
   (test "releasing drifts: it coasts on with decaying velocity, not a dead stop"
     (let (st (assoc (init 200 120 7 {:mode :pve :difficulty 5 :game 5 :points 11})
                :l-dir 0
                :l-vel 2.0
                :lp 40)
           ph (side-ph st :left (get st :rows))
-          [t v] (human-step st :left ph 40 (get st :rows)))
+          [t v _] (human-step st :left ph 40 (get st :rows)))
       ; still moving (drift), but slower than before, and it advanced
       (is (< 0 v 2.0))
       (is (> t 40)))))

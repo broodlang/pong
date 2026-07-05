@@ -135,14 +135,14 @@
       (is (= (get st :announce-life) 40))
       (is (= (get st :announce-max) 40))))
   (test "a point at match score declares the winner and shatters the loser"
-    (let (won (point (assoc (init 200 60 7) :ls (- *win-score* 1) :rs 3) :left 200))
+    (let (won (point (assoc (init 200 60 7) :ls (- *win-score* 1) :rs 3) :left))
       (is (= (get won :winner) :left))
       (is (= (get won :ls) *win-score*))
       (is (= (get won :rs) 3))
       (is (= (get won :r-dmg) *paddle-hits-max*))
       (is (= (get won :announce) "LEFT WINS!"))))
   (test "an ordinary point increments the score and announces POINT"
-    (let (p (point (assoc (init 200 60 7) :ls 2 :rs 2) :right 0))
+    (let (p (point (assoc (init 200 60 7) :ls 2 :rs 2) :right))
       (is (= (get p :rs) 3))
       (is (= (get p :announce) "POINT!")))))
 
@@ -334,7 +334,7 @@
 ; quiet sits lower (less lifted)
 (describe "crowd"
   (test "a point makes the crowd cheer, and the cheer ebbs each frame"
-    (let (scored (point (assoc (init 200 60 7) :ls 0 :rs 0) :left 200))
+    (let (scored (point (assoc (init 200 60 7) :ls 0 :rs 0) :left))
       (is (> (get scored :cheer) 0))
       (is (< (get (step scored) :cheer) (get scored :cheer)))))
   ; hype tracks the ball's pace (baseline × game-difficulty), so faster ⇒ wilder
@@ -587,7 +587,7 @@
   (test "a destroyed paddle repairs after *paddle-broke-frames*, not on a score"
     (let (broke (assoc (init 400 120 7) :r-dmg *paddle-hits-max* :r-broke *paddle-broke-frames*)
           ; a score never heals it
-          scored (point (assoc broke :ls 0 :rs 0) :left 400)
+          scored (point (assoc broke :ls 0 :rs 0) :left)
           ; but the timer running out does
           healed (reduce (fn (s _) (step-broke s)) broke (range *paddle-broke-frames*)))
       (is (paddle-broken? scored :right))

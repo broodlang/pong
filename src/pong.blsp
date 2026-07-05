@@ -2858,16 +2858,26 @@ current screen-shake offset."
                 (load-bar-ops st :right)
                 (bullet-ops st)
                 (charge-aura-ops st)
-                (ball-op st hue)
-                (spinner-ops st)
-                (countdown-ops st cols rows)
-                (announce-ops st cols rows)))
+                ;; the in-play ball shakes with the court; the PARKED serve ball is
+                ;; drawn in the steady overlay below so the spawn never drifts
+                (if serving? nil (ball-op st hue))
+                (announce-ops st cols rows))
+        ;; the pre-serve presentation — parked ball, spinner needle and the 3-2-1
+        ;; countdown — is drawn WITHOUT the screen-shake offset so the serve always
+        ;; sits dead-centre (the post-point shake used to jitter the countdown number
+        ;; off toward a paddle)
+        serve-overlay (if serving?
+                        (concat (ball-op st hue)
+                          (spinner-ops st)
+                          (countdown-ops st cols rows))
+                        nil))
     (into [[:clear] (bg-op st cols rows)]
       (concat (or (get st :crowd-ops) (crowd-ops st cols rows))
         (crowd-show-ops st cols rows)
         (sign-ops st)
         (ufo-ops st rows)
-        (if (and (= dr 0) (= dc 0)) front (map (fn (op) (shift-op op dr dc)) front))))))
+        (if (and (= dr 0) (= dc 0)) front (map (fn (op) (shift-op op dr dc)) front))
+        serve-overlay))))
 
 ;; ---- the loop (the window owner; self-paced) ----
 (defn quit? (m)

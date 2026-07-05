@@ -545,6 +545,13 @@ forth motion without trig (for the bouncing beach ball etc.)."
     (if (< f 0.5) (* 2 f) (- 2 (* 2 f)))))
 
 ;; ---- colour ----
+(defn round-byte (x)
+  "Round a non-negative float to the nearest integer via `(floor (+ x 0.5))`. `round`
+is ~25× costlier than `floor` and colour conversion is the dominant render cost, so
+the whole colour path uses this instead. Colours are always ≥ 0, so half-up is exact
+enough (and matches `round` except on exact-half ties, an invisible ±1)."
+  (floor (+ x 0.5)))
+
 (defn hsv->rgb (h s v)
   "An HSV colour (`h` 0–360°, `s`/`v` 0–1) as an `[r g b]` byte vector (0–255) —
 the form a face `:bg`/`:fg` takes. Standard sextant conversion."
@@ -561,7 +568,7 @@ the form a face `:bg`/`:fg` takes. Standard sextant conversion."
                   (= i 3) [p q v]
                   (= i 4) [u p v]
                   :else [v p q]))
-    [(round (* 255 r)) (round (* 255 g)) (round (* 255 b))]))
+    [(round-byte (* 255 r)) (round-byte (* 255 g)) (round-byte (* 255 b))]))
 
 ;; ---- particle explosions ----
 (defn spawn-burst--acc (s cx cy hue speed n acc)
@@ -2727,10 +2734,11 @@ the ball over `*charge-glow-frames*` — the visible kick of a loaded hit."
           [:rect top (+ left w -1) 1 h {:bg col}]]))))
 
 (defn spinner-ops (st)
-  "The pre-serve SPINNER: a faint dotted RING around the parked ball with a bright
-BALL orbiting it at `:spin-angle` (x widened ×2 so the circle reads round on the
-tall-celled grid). The orbiting ball whirls while the count runs and stops on
-release, its resting side deciding the serve. Nil once released."
+  "The pre-serve SPINNER: a faint dotted RING centred on the parked ball with a
+NEEDLE sweeping out from the ball to the ring at `:spin-angle` (x widened ×2 so the
+circle reads round on the tall-celled grid). The ball stays drawn at centre; the
+needle whirls while the count runs and stops on release, its resting side deciding
+the serve. Nil once released."
   (if (<= (get st :countdown) 0)
     nil
     (let (cx (+ (get st :bx) (/ *ball-w* 2))
@@ -2745,19 +2753,16 @@ release, its resting side deciding the serve. Nil once released."
                             y (round (+ cy (* r (sin a)))))
                         [:rect y x 1 1 {:bg (hsv->rgb hue 0.5 0.35)}]))
                  (range 32))
-          ; the orbiting ball riding the ring, with a short fading tail behind it
-          orbit (map (fn (k)
-                       (let (a (- ang (* k 0.4))
-                             sz (- 3 k)
-                             x (round (+ cx (* r 2 (cos a))))
-                             y (round (+ cy (* r (sin a)))))
-                         [:rect (- y (quot sz 2))
-                           (- x sz)
-                           (* 2 sz)
-                           sz
-                           {:bg (hsv->rgb hue 0.85 (- 1.0 (* k 0.22)))}]))
-                  (range 3)))
-      (concat ring orbit))))
+          ; the needle: dots marching from just outside the ball out to the ring
+          ; tip, brightening toward the end, so it reads as a pointer around the
+          ; centred ball rather than a second ball orbiting off to the side
+          needle (map (fn (k)
+                        (let (f (/ (+ k 3) 8.0)
+                              x (round (+ cx (* r 2 f (cos ang))))
+                              y (round (+ cy (* r f (sin ang)))))
+                          [:rect y x 1 1 {:bg (hsv->rgb hue 0.85 (+ 0.5 (* f 0.5)))}]))
+                   (range 5)))
+      (concat ring needle))))
 
 (defn countdown-ops (st cols rows)
   "The pre-serve COUNTDOWN readout: the seconds-remaining digit, big and centred above
@@ -2790,8 +2795,9 @@ current screen-shake offset."
         r-face {:bg (paddle-color st :right *right-color*)}
         left-ops (paddle-render-ops (floor (get st :lp)) (left-x) lph l-face (get st :l-dmg))
         right-ops (paddle-render-ops (floor (get st :rp)) (right-x cols) rph r-face (get st :r-dmg))
-        ;; while counting down the ball is parked at centre — hide it and its trail so
-        ;; the spinner ring stays EMPTY; the ball only appears (at centre) on release
+        ;; while counting down the ball sits parked at centre — the ball itself stays
+        ;; drawn (so it's unmistakably centred) with the spinner needle sweeping around
+        ;; it; only the trail is hidden, since a parked ball has nowhere to trail
         serving? (> (get st :countdown) 0)
         [dr dc] (shake-offset st)
         front (concat (wind-ops st)
@@ -2812,7 +2818,7 @@ current screen-shake offset."
                 (load-bar-ops st :right)
                 (bullet-ops st)
                 (charge-aura-ops st)
-                (if serving? nil [(ball-op st hue)])
+                [(ball-op st hue)]
                 (spinner-ops st)
                 (countdown-ops st cols rows)
                 (announce-ops st cols rows)))

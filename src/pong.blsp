@@ -2902,26 +2902,16 @@ current screen-shake offset."
                 (load-bar-ops st :right)
                 (bullet-ops st)
                 (charge-aura-ops st)
-                ;; the in-play ball shakes with the court; the PARKED serve ball is
-                ;; drawn in the steady overlay below so the spawn never drifts
-                (if serving? nil (ball-op st hue))
-                (announce-ops st cols rows))
-        ;; the pre-serve presentation — parked ball, spinner needle and the 3-2-1
-        ;; countdown — is drawn WITHOUT the screen-shake offset so the serve always
-        ;; sits dead-centre (the post-point shake used to jitter the countdown number
-        ;; off toward a paddle)
-        serve-overlay (if serving?
-                        (concat (ball-op st hue)
-                          (spinner-ops st)
-                          (countdown-ops st cols rows))
-                        nil))
+                (ball-op st hue)
+                (spinner-ops st)
+                (countdown-ops st cols rows)
+                (announce-ops st cols rows)))
     (into [[:clear] (bg-op st cols rows)]
       (concat (or (get st :crowd-ops) (crowd-ops st cols rows))
         (crowd-show-ops st cols rows)
         (sign-ops st)
         (ufo-ops st rows)
-        (if (and (= dr 0) (= dc 0)) front (map (fn (op) (shift-op op dr dc)) front))
-        serve-overlay))))
+        (if (and (= dr 0) (= dc 0)) front (map (fn (op) (shift-op op dr dc)) front))))))
 
 ;; ---- the loop (the window owner; self-paced) ----
 (defn quit? (m)
@@ -3140,10 +3130,20 @@ event. Coupling redraws to keystrokes is what made player-vs-player jitter: two
 humans holding keys flood the loop with input, and each re-render of the (heavy)
 `render` op-vector churns allocation between ticks. Key presses only flip paddle
 direction / shoot flags; nothing visible moves until the next `step`, so re-parking
-without redrawing costs no responsiveness."
-  (do
-    (gui-draw w (render st))
-    (loop-wait w st deadline)))
+without redrawing costs no responsiveness.
+
+Before drawing, the world is RE-FITTED to the window's ACTUAL cell size (`gui-size`)
+whenever it differs — a cheap no-op when unchanged. This guarantees the court always
+fills the real window (so a centred serve is centred ON SCREEN), catching the case
+where the opening maximise resized the window without our seeing a `[:resize]` (which
+otherwise left the court drawn narrow in the left of the window)."
+  (let ([wc wr] (gui-size w)
+        crows (court-rows wr)
+        st1 (if (and (= wc (get st :cols)) (= crows (get st :rows)))
+              st
+              (refit st wc wr)))
+    (gui-draw w (render st1))
+    (loop-wait w st1 deadline)))
 
 (defn loop-wait (w st deadline)
   "Park in `(receive)` until the frame `deadline` WITHOUT redrawing: a `[:resize]`

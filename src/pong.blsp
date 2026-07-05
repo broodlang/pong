@@ -1976,6 +1976,16 @@ reads during the pause."
     :charge-glow (max 0 (- (get st :charge-glow) 1))
     :announce-life (max 0 (- (get st :announce-life) 1))))
 
+(defn refresh-crowd (st)
+  "Rebuild the cached crowd op-list (`:crowd-ops`) every OTHER tick and reuse it
+verbatim in between. The stand is background eye-candy, so animating it at ~30fps is
+invisible — but rebuilding 160 seats (2–3 HSV colours each) is the render loop's
+single biggest cost and allocator, so halving it cuts frame-time spikes / GC churn
+(the source of motion jitter). `refit` clears the cache when the court is resized."
+  (if (and (get st :crowd-ops) (= 1 (mod (get st :t) 2)))
+    st
+    (assoc st :crowd-ops (crowd-ops st (get st :cols) (get st :rows)))))
+
 (defn age-frame (st hue)
   "Age this frame's cosmetics on `st` — push the ball's position onto the trail, step
 the particles, and decay flash/pop/shake/cheer/glow/announcer — then advance the
@@ -1990,7 +2000,7 @@ cosmetic and event subsystems. Shared by the live `step` and the pre-serve count
                :cheer (max 0 (- (get st :cheer) 1))
                :charge-glow (max 0 (- (get st :charge-glow) 1))
                :announce-life (max 0 (- (get st :announce-life) 1))))
-    (step-broke (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged))))))))))))
+    (refresh-crowd (step-broke (step-bullets (step-court-event (step-show (step-signs (step-streaker (step-ufo (step-streaks (step-tokens (age-effects aged)))))))))))))
 
 (defn step-countdown (st)
   "A pre-serve COUNTDOWN frame: the ball is HELD at centre while its needle SPINS
@@ -2083,6 +2093,8 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
     (serve
       {:cols cols
        :rows rows
+       ;; the goal mesh is fixed for a court size — cache it (rebuilt in `refit`)
+       :goal-ops (goal-ops cols rows)
        :bx (/ cols 2)
        :by (/ rows 2)
        :vx 0
@@ -2185,16 +2197,24 @@ test/default path) it's AI-vs-AI at MEDIUM, first to `*win-score*`."
        :s s})))
 
 (defn refit (st cols rows)
-  "Re-fit the world to a resized `cols`×`rows` window, clamping the ball and
-paddles back into the new bounds (keeping the score and motion)."
+  "Re-fit the world to a resized `cols`×`rows` window, clamping the paddles (and a
+ball in flight) back into the new bounds while keeping the score and motion. A ball
+PARKED for the pre-serve countdown is RE-CENTRED rather than clamped — otherwise a
+resize mid-countdown (notably the launch maximise) would leave it offset toward a
+paddle, so it must always sit dead-centre at serve."
   (let (crows (court-rows rows)
         lph (side-ph st :left crows)
-        rph (side-ph st :right crows))
+        rph (side-ph st :right crows)
+        serving? (> (get st :countdown) 0))
     (assoc st
       :cols cols
       :rows crows
-      :bx (clamp (get st :bx) 0 (- cols *ball-w*))
-      :by (clamp (get st :by) 0 (- crows *ball-h*))
+      ;; the court size changed — rebuild the static goal mesh and drop the crowd
+      ;; cache so both re-fit to the new width
+      :goal-ops (goal-ops cols crows)
+      :crowd-ops nil
+      :bx (if serving? (- (/ cols 2) (/ *ball-w* 2)) (clamp (get st :bx) 0 (- cols *ball-w*)))
+      :by (if serving? (- (/ crows 2) (/ *ball-h* 2)) (clamp (get st :by) 0 (- crows *ball-h*)))
       :lp (clamp (get st :lp) 0 (- crows lph))
       :rp (clamp (get st :rp) 0 (- crows rph)))))
 
@@ -2274,22 +2294,23 @@ as long as the wind is strong (so a stiff wind shows as longer, brighter dashes)
       (get st :streaks))))
 
 (defn badge-ops (tx ty hue throb glyph)
-  "A glossy pickup badge at `(tx, ty)`: a soft pulsing GLOW behind, the saturated
-BODY, a bright SHEEN across its top, and the white `glyph` centred — the shared
-look for floating tokens and the HUD effect indicators."
+  "A glossy pickup badge at `(tx, ty)`: a soft pulsing ROUND glow behind, the
+saturated rounded BODY with a bright rim, a SHEEN highlight across its top, and the
+white `glyph` centred."
   (let (gs (max 1 (- *powerup-h* 2))
-        glow [:rect (- ty 1)
-               (- tx 1)
-               (+ *powerup-w* 2)
-               (+ *powerup-h* 2)
-               {:bg (hsv->rgb hue 0.7 (* 0.3 throb))}]
-        body [:rect ty tx *powerup-w* *powerup-h* {:bg (hsv->rgb hue 0.85 throb)}]
-        sheen [:rect ty tx *powerup-w* 1 {:bg (hsv->rgb hue 0.35 (min 1.0 (+ 0.35 throb)))}]
+        ;; a round halo one cell larger all round, pulsing with the throb
+        glow (disc-ops (- ty 1) (- tx 1) (+ *powerup-w* 2) (+ *powerup-h* 2)
+               {:bg (hsv->rgb hue 0.7 (* 0.3 throb))})
+        ;; the rounded body
+        body (disc-ops ty tx *powerup-w* *powerup-h* {:bg (hsv->rgb hue 0.85 throb)})
+        ;; a short bright highlight strip near the top for the gloss
+        sheen [:rect (+ ty 1) (+ tx 2) (max 1 (- *powerup-w* 4)) 1
+                {:bg (hsv->rgb hue 0.3 (min 1.0 (+ 0.45 throb)))}]
         glyph-op [:text (+ ty (floor (/ (- *powerup-h* gs) 2)))
                    (+ tx (floor (/ (- *powerup-w* gs) 2)))
                    glyph
                    {:scale gs :fg [255 255 255] :bold true}])
-    [glow body sheen glyph-op]))
+    (concat glow body [sheen glyph-op])))
 
 (defn token-ops (st)
   "Each floating power-up as a glossy badge (green = good, red = bad) showing its
@@ -2640,18 +2661,35 @@ so the axes don't move in lockstep), where `mag = floor(:shake)`. `[0 0]` at res
       [0 0]
       [(- (mod (* t 7) span) mag) (- (mod (* t 13) span) mag)])))
 
+(defn disc-ops (top left w h face)
+  "Render ops for a rounded blob filling the `w`×`h` box at `(top, left)`: each row is
+inset toward an ellipse so the corners are clipped and the shape reads round instead
+of blocky. One `[:rect …]` per row, all in `face`. Shared by the ball and the pickup
+badges."
+  (let (hw (/ w 2.0)
+        hh (/ h 2.0))
+    (map (fn (r)
+           (let (;; this row's centre distance from the middle, 0 (centre) … 1 (edge)
+                 dy (if (<= h 1) 0 (/ (abs (- (+ r 0.5) hh)) hh))
+                 ;; the ellipse's half-width at that height ⇒ how far to inset the row
+                 half (* hw (sqrt (max 0 (- 1 (* dy dy)))))
+                 inset (max 0 (round (- hw half)))
+                 iw (max 1 (- w (* 2 inset))))
+             [:rect (+ top r) (+ left inset) iw 1 face]))
+      (range h))))
+
 (defn ball-op (st hue)
-  "The ball op: normally a glowing disc in the master hue, but during an impact
-`:pop` it flares WHITE and grows up to `*pop-grow*` cells on every side, shrinking
-back as the pop ages."
+  "The ball ops: normally a glowing rounded disc in the master hue, but during an
+impact `:pop` it flares WHITE and grows up to `*pop-grow*` cells on every side,
+shrinking back as the pop ages."
   (let (pop (get st :pop)
         grow (if (= pop 0) 0 (round (* (/ pop *pop-frames*) *pop-grow*)))
         face (if (= pop 0) {:bg (hsv->rgb hue 0.55 1.0)} {:bg [255 255 255]}))
-    [:rect (- (floor (get st :by)) grow)
+    (disc-ops (- (floor (get st :by)) grow)
       (- (floor (get st :bx)) grow)
       (+ *ball-w* (* 2 grow))
       (+ *ball-h* (* 2 grow))
-      face]))
+      face)))
 
 (defn streaker-ops (st)
   "The streaker on the court (if any): a little running figure — head, bare body
@@ -2801,7 +2839,9 @@ current screen-shake offset."
         serving? (> (get st :countdown) 0)
         [dr dc] (shake-offset st)
         front (concat (wind-ops st)
-                (goal-ops cols rows)
+                ;; the goal mesh is fixed for a given court size — use the cached
+                ;; copy (rebuilt only in `init`/`refit`) rather than reallocating it
+                (or (get st :goal-ops) (goal-ops cols rows))
                 (net-ops cols rows hue)
                 (score-ops st hue)
                 (effect-indicator-ops st cols)
@@ -2818,12 +2858,12 @@ current screen-shake offset."
                 (load-bar-ops st :right)
                 (bullet-ops st)
                 (charge-aura-ops st)
-                [(ball-op st hue)]
+                (ball-op st hue)
                 (spinner-ops st)
                 (countdown-ops st cols rows)
                 (announce-ops st cols rows)))
     (into [[:clear] (bg-op st cols rows)]
-      (concat (crowd-ops st cols rows)
+      (concat (or (get st :crowd-ops) (crowd-ops st cols rows))
         (crowd-show-ops st cols rows)
         (sign-ops st)
         (ufo-ops st rows)

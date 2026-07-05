@@ -1310,8 +1310,8 @@ and `score` turns it into a point."
       hit-right? (paddle-hit (assoc st :owner :right) (- rx *ball-w*) (get st :rp) rph rx by)
       :else st)))
 
-(defn point (st scorer x)
-  "Award a point to `scorer` (`:left`/`:right`), exiting at `x`. Resets the rally,
+(defn point (st scorer)
+  "Award a point to `scorer` (`:left`/`:right`). Resets the rally,
 kicks the hue to a fresh palette, flashes the court, throws a big shake + explosion
 and announces the moment. Paddle damage is NOT repaired by a score (it heals on its
 own timer), so an ordinary point just re-serves (a fresh spin-countdown picks a random
@@ -1343,7 +1343,11 @@ detonates the board + crowd finale."
                :cheer (if win? (* *cheer-frames* 2) *cheer-frames*))
         announced (announce boom text hue (if win? *win-announce-life* *announce-life*))
         n (if win? (* *score-particles* 2) *score-particles*)
-        blasted (spawn-burst announced x (center (get st :by) *ball-h*) n *score-speed* hue))
+        ;; the celebration bursts from the COURT CENTRE, where the ball respawns — not
+        ;; from the goal the ball left through, which planted a ball-sized cloud right
+        ;; on the losing side's paddle and read as the ball spawning there
+        blasted (spawn-burst announced (/ (get st :cols) 2) (/ (get st :rows) 2)
+                  n *score-speed* hue))
     ;; re-serve either way: an ordinary point starts a fresh spin-countdown, a win
     ;; parks it at centre (frozen — `win-loop` runs the finale and never steps)
     (serve blasted)))
@@ -1353,8 +1357,8 @@ detonates the board + crowd finale."
 `st` be. The re-serve's spin picks a random side."
   (let (bx (get st :bx) cols (get st :cols))
     (cond
-      (< (+ bx *ball-w*) 0) (point st :right 0)
-      (> bx cols) (point st :left cols)
+      (< (+ bx *ball-w*) 0) (point st :right)
+      (> bx cols) (point st :left)
       :else st)))
 
 ;; ---- power-up tokens ----
@@ -3130,20 +3134,10 @@ event. Coupling redraws to keystrokes is what made player-vs-player jitter: two
 humans holding keys flood the loop with input, and each re-render of the (heavy)
 `render` op-vector churns allocation between ticks. Key presses only flip paddle
 direction / shoot flags; nothing visible moves until the next `step`, so re-parking
-without redrawing costs no responsiveness.
-
-Before drawing, the world is RE-FITTED to the window's ACTUAL cell size (`gui-size`)
-whenever it differs — a cheap no-op when unchanged. This guarantees the court always
-fills the real window (so a centred serve is centred ON SCREEN), catching the case
-where the opening maximise resized the window without our seeing a `[:resize]` (which
-otherwise left the court drawn narrow in the left of the window)."
-  (let ([wc wr] (gui-size w)
-        crows (court-rows wr)
-        st1 (if (and (= wc (get st :cols)) (= crows (get st :rows)))
-              st
-              (refit st wc wr)))
-    (gui-draw w (render st1))
-    (loop-wait w st1 deadline)))
+without redrawing costs no responsiveness."
+  (do
+    (gui-draw w (render st))
+    (loop-wait w st deadline)))
 
 (defn loop-wait (w st deadline)
   "Park in `(receive)` until the frame `deadline` WITHOUT redrawing: a `[:resize]`

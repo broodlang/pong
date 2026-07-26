@@ -670,7 +670,7 @@ timer), and set off a big fiery burst, shake and a BOOM! callout. Threads PRNG."
         cx (* idx *crowd-spacing*)
         cy (+ rows (quot *crowd-rows* 2))
         boom (assoc st
-               :abducted (concat gaps (get st :abducted))
+               :abducted (append gaps (get st :abducted))
                :shake (max (get st :shake) *score-shake*)
                :s s1)
         announced (announce boom "BOOM!" 18 *announce-life*))
@@ -1147,7 +1147,7 @@ through the crowd and bounces it back off the stand floor into play."
         gaps (map (fn (j) {:col (* j *crowd-spacing*) :life *abduct-respawn*}) victims)
         cy (+ rows (quot *crowd-rows* 2))
         smashed (assoc st
-                  :abducted (concat gaps (get st :abducted))
+                  :abducted (append gaps (get st :abducted))
                   :in-crowd true
                   :vx (* (get st :vx) *crash-slow*)
                   :vy (* 0.6 *max-vy*)
@@ -2297,11 +2297,11 @@ net mesh filling each mouth, with bright posts framing it top and bottom."
         lx (left-x)
         rx0 (+ (right-x cols) *paddle-w*)
         rw (max 1 (- cols rx0))
-        left-net (concat (map (fn (x) [:rect 0 x 1 rows mesh]) (range 0 lx 3))
+        left-net (append (map (fn (x) [:rect 0 x 1 rows mesh]) (range 0 lx 3))
                    (map (fn (y) [:rect y 0 lx 1 mesh]) (range 0 rows 4)))
-        right-net (concat (map (fn (x) [:rect 0 x 1 rows mesh]) (range rx0 cols 3))
+        right-net (append (map (fn (x) [:rect 0 x 1 rows mesh]) (range rx0 cols 3))
                     (map (fn (y) [:rect y rx0 rw 1 mesh]) (range 0 rows 4))))
-    (concat left-net
+    (append left-net
       right-net
       [[:rect 0 0 lx 1 post] [:rect (- rows 1) 0 lx 1 post]
         [:rect 0 rx0 rw 1 post]
@@ -2363,7 +2363,7 @@ white `glyph` centred."
                    (+ tx (floor (/ (- *powerup-w* gs) 2)))
                    glyph
                    {:scale gs :fg [255 255 255] :bold true}])
-    (concat glow body [sheen glyph-op])))
+    (append glow body [sheen glyph-op])))
 
 (defn token-ops (st)
   "Each floating power-up as a glossy badge (green = good, red = bad) showing its
@@ -2503,7 +2503,7 @@ while its beam reaches its target — a faint green tractor beam down into the s
                       (- (+ rows *crowd-rows*) (+ uy 2))
                       {:bg (hsv->rgb 130 0.85 0.32)}]]
                    nil))
-        (concat [dome body light-l light-r] beam)))))
+        (append [dome body light-l light-r] beam)))))
 
 (defn crowd-show-ops (st cols rows)
   "The active cosmetic crowd show (if any), drawn over/around the stand: phone
@@ -2600,14 +2600,14 @@ effect's `:life` runs down — so you can see what's active and for how much lon
 (defn side-fx-ops (effs x0)
   "Stack a side's active-effect badges down from the top edge at column `x0`."
   (first (reduce (fn ([ops row] eff)
-                   [(concat ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)])
+                   [(append ops (fx-badge-ops x0 row eff)) (+ row *fx-badge-h* *fx-badge-gap* 1)])
            [nil *fx-badge-top*]
            effs)))
 
 (defn effect-indicator-ops (st cols)
   "Active-effect badges in the top corners — left side's effects top-left, right
 side's top-right — each counting its remaining time down."
-  (concat (side-fx-ops (get st :l-fx) 1)
+  (append (side-fx-ops (get st :l-fx) 1)
     (side-fx-ops (get st :r-fx) (- cols *fx-badge-w* 1))))
 
 (defn bullet-ops (st)
@@ -2621,7 +2621,7 @@ side's top-right — each counting its remaining time down."
 (bright yellow when armed, dim when empty), and a row of pips run inward."
   (let (badge (fn (gun n x pip-dir)
                 (let (col (if (> n 0) [255 232 110] [96 96 116]))
-                  (concat [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1
+                  (append [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1
                                                                                                        (+ x
                                                                                                          4)
                                                                                                        (str n)
@@ -2631,7 +2631,7 @@ side's top-right — each counting its remaining time down."
                     ;; pips trailing inward, one per shot (capped so they don't run on)
                     (map (fn (i) [:rect 5 (+ x (* pip-dir (* (+ i 1) 3))) 2 1 {:bg col}])
                       (range (min n 14)))))))
-    (concat (badge (gun-of st :left) (get st :l-ammo) (left-x) 1)
+    (append (badge (gun-of st :left) (get st :l-ammo) (left-x) 1)
       (badge (gun-of st :right) (get st :r-ammo) (- (right-x cols) 8) -1))))
 
 (defn damage-face (face dmg)
@@ -2667,7 +2667,7 @@ until it self-repairs. Never nil, never vanishes."
   (let (w *paddle-w* body (damage-face face dmg))
     (cond
       (<= dmg 0) [[:rect top px w ph body]]
-      (< dmg *paddle-hits-max*) (concat [[:rect top px w ph body]] (crack-ops top px ph dmg))
+      (< dmg *paddle-hits-max*) (append [[:rect top px w ph body]] (crack-ops top px ph dmg))
       ;; DESTROYED: three chunks slid sideways with molten-red fracture seams between
       :else (let (ch (max 1 (quot (- ph 2) 3)))
               (mapcat (fn (i)
@@ -2853,7 +2853,7 @@ the serve. Nil once released."
                               y (round (+ cy (* r f (sin ang)))))
                           [:rect y x 1 1 {:bg (hsv->rgb hue 0.85 (+ 0.5 (* f 0.5)))}]))
                    (range 5)))
-      (concat ring needle))))
+      (append ring needle))))
 
 (defn countdown-ops (st cols rows)
   "The pre-serve COUNTDOWN readout: the seconds-remaining digit, big and centred above
@@ -2891,7 +2891,7 @@ current screen-shake offset."
         ;; it; only the trail is hidden, since a parked ball has nowhere to trail
         serving? (> (get st :countdown) 0)
         [dr dc] (shake-offset st)
-        front (concat (wind-ops st)
+        front (append (wind-ops st)
                 ;; the goal mesh is fixed for a given court size — use the cached
                 ;; copy (rebuilt only in `init`/`refit`) rather than reallocating it
                 (or (get st :goal-ops) (goal-ops cols rows))
@@ -2916,7 +2916,7 @@ current screen-shake offset."
                 (countdown-ops st cols rows)
                 (announce-ops st cols rows)))
     (into [[:clear] (bg-op st cols rows)]
-      (concat (or (get st :crowd-ops) (crowd-ops st cols rows))
+      (append (or (get st :crowd-ops) (crowd-ops st cols rows))
         (crowd-show-ops st cols rows)
         (sign-ops st)
         (ufo-ops st rows)
@@ -3214,7 +3214,7 @@ players' keys with who drives each side."
                                               (+ sc 2)
                                               {:bg (hsv->rgb h2 0.6 0.25)}]])
                                          nil))
-                               (concat bar [(menu-text-op cols row label sc fg)])))
+                               (append bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts)))
         cscale (max 1 (round (* rows 0.023)))
         clh (+ cscale 3)
@@ -3232,7 +3232,7 @@ players' keys with who drives each side."
                        (pause-ctrl-tag st :right))
                      cscale
                      [230 150 200])])
-    (concat [[:rect (- py 1) (- px 1) (+ pw 2) (+ ph 2) {:bg (hsv->rgb hue 0.5 0.8)}] [:rect py
+    (append [[:rect (- py 1) (- px 1) (+ pw 2) (+ ph 2) {:bg (hsv->rgb hue 0.5 0.8)}] [:rect py
                                                                                         px
                                                                                         pw
                                                                                         ph
@@ -3350,9 +3350,9 @@ barred + brighter)."
                                               (+ sc 2)
                                               {:bg (hsv->rgb h2 0.6 0.25)}]])
                                          nil))
-                               (concat bar [(menu-text-op cols row label sc fg)])))
+                               (append bar [(menu-text-op cols row label sc fg)])))
                      (range (count opts))))
-    (concat [(menu-text-op cols
+    (append [(menu-text-op cols
                (round (* rows 0.28))
                name
                (min 16 (max 2 (round (* rows 0.12))))
@@ -3565,7 +3565,7 @@ and lit in a rainbow hue over a soft bar, the rest small and dim."
                                 col (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
                             [[:rect (- row 2) col w (+ sc 4) {:bg (hsv->rgb hue 0.6 0.22)}]])
                           nil))
-                (concat bar [txt])))
+                (append bar [txt])))
       (range (count opts)))))
 
 (defn menu-breadcrumb (menu)
@@ -3574,7 +3574,7 @@ or nil before any."
   (let (mode (get menu :mode)
         diff (get menu :difficulty)
         game (get menu :game)
-        parts (concat (if mode [(str "MODE  " (choice-label mode))] nil)
+        parts (append (if mode [(str "MODE  " (choice-label mode))] nil)
                 (if diff [(str "AI LVL " diff " " (difficulty-descriptor diff))] nil)
                 (if game [(str "GAME LVL " game " " (game-descriptor game))] nil)))
     (if (empty? parts)
@@ -3614,7 +3614,7 @@ short) — adjusted with UP/DOWN. Shared by the AI- and GAME-difficulty steps."
                                 [56 62 82]))
                       [:rect (+ prow (- pip-h h2)) x pip-w h2 {:bg col}]))
                (range npips)))
-    (concat [big-op desc-op] pips)))
+    (append [big-op desc-op] pips)))
 
 (defn render-menu (menu)
   "The opening menu as a render-op vector: a big rainbow BROOD PONG title, the
@@ -3663,7 +3663,7 @@ breadcrumb of the choices made, and the controls hint."
                     (max 1 (round (* rows 0.02)))
                     [110 120 140])])
     (into [[:clear] [:rect 0 0 cols rows {:bg [8 10 18]}]]
-      (concat title-ops sub-ops body-ops crumb-ops hint-ops))))
+      (append title-ops sub-ops body-ops crumb-ops hint-ops))))
 
 (defn menu-up? (m)
   "Is keypress `m` a move-up (left player's W, or the up arrow)?"

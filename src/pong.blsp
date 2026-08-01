@@ -584,7 +584,7 @@ the form a face `:bg`/`:fg` takes. Standard sextant conversion."
                   (= i 2) [p v u]
                   (= i 3) [p q v]
                   (= i 4) [u p v]
-                  :else [v p q]))
+                  else [v p q]))
     [(round-byte (* 255 r)) (round-byte (* 255 g)) (round-byte (* 255 b))]))
 
 ;; ---- particle explosions ----
@@ -648,7 +648,7 @@ at a length that isn't a milestone (so most hits stay quiet)."
     (= r 11) "ON FIRE!"
     (= r 16) "UNREAL!!"
     (and (> r 16) (= 0 (mod r 5))) (str "INSANE x" r "!")
-    :else nil))
+    else nil))
 
 (defn rally-announce (st r)
   "Fire the rally callout for length `r` if it's a milestone, else leave `st` be."
@@ -810,7 +810,7 @@ puts the human on the LEFT (W/S) against the right AI, EvE is two AIs."
   (cond
     (= mode :pvp) {:l-ctrl :human :r-ctrl :human}
     (= mode :pve) {:l-ctrl :human :r-ctrl :ai}
-    :else {:l-ctrl :ai :r-ctrl :ai}))
+    else {:l-ctrl :ai :r-ctrl :ai}))
 
 (defn difficulty-params (level)
   "The AI tuning multipliers for difficulty `level` (1–10), interpolated linearly
@@ -960,7 +960,7 @@ court, and hitting a wall kills the drift."
         hold1 (cond
                 (= dir 0) 0
                 reversing? 1
-                :else (+ hold 1))
+                else (+ hold 1))
         ;; ease from `*paddle-accel-min*` of full thrust up to full over the ramp —
         ;; the floor keeps the paddle responsive from the very first frame
         accel (* *paddle-accel*
@@ -1019,7 +1019,7 @@ ping-pongs, so it must catch the peak. An AI (only while DEFENDING) defers to
     (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (get st
                                                           (side-key side :l-loading :r-loading))
     (not defend) false
-    :else (ai-charge? st side ph paddle-top rows)))
+    else (ai-charge? st side ph paddle-top rows)))
 
 (defn load-step (cur dir loading? locked?)
   "Advance a paddle's load one frame, returning `[load' dir']` (`dir` +1 rising / -1
@@ -1032,9 +1032,9 @@ it drains by `*load-decay*` toward 0 (direction reset)."
                (cond
                  (>= n 1.0) [1.0 -1]
                  (<= n 0.0) [0.0 1]
-                 :else [n dir]))
+                 else [n dir]))
     locked? [cur dir]
-    :else [(max 0.0 (- cur *load-decay*)) 1]))
+    else [(max 0.0 (- cur *load-decay*)) 1]))
 
 (defn step-load (st side defend ph paddle-top rows)
   "Advance `side`'s load one frame (via `side-loading?` + `load-step`), returning `st`
@@ -1066,7 +1066,7 @@ zero inertia — so the difficulty curve stays calibrated)."
   (cond
     frozen? [paddle-top 0 0]
     (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (human-step st side ph paddle-top rows)
-    :else [(ai-side-top st side ph paddle-top rows defend) 0 0]))
+    else [(ai-side-top st side ph paddle-top rows defend) 0 0]))
 
 (defn move-ai (st)
   "One frame of paddle motion for BOTH sides: re-roll the AI aim bias on its period,
@@ -1122,7 +1122,7 @@ would rally forever). A centre hit returns the gentle minimum; an edge hit steep
         (>= v *min-vy*) v
         (<= v (- 0 *min-vy*)) v
         (>= v 0) *min-vy*
-        :else (- 0 *min-vy*)))))
+        else (- 0 *min-vy*)))))
 
 (defn splat-seat-under (st)
   "Splat the one spectator directly under the ball (a gap that repopulates) — the
@@ -1184,7 +1184,7 @@ ball off the BOTTOM wall has a `*crash-chance*` to smash through into the crowd.
                                                                     :shake (max (get st1 :shake)
                                                                              *wall-shake*))
                              (<= (+ (get st1 :by) *ball-h*) rows) (assoc st1 :in-crowd false)
-                             :else st1))
+                             else st1))
       (> (+ by *ball-h*) rows) (let ([roll s1] (rand-float (get st :s)))
                                  (if (and (> (abs (get st :vx)) *crash-speed*)
                                        (< roll *crash-chance*))
@@ -1198,7 +1198,7 @@ ball off the BOTTOM wall has a `*crash-chance*` to smash through into the crowd.
                                      0
                                      *wall-particles*
                                      *wall-speed*)))
-      :else st)))
+      else st)))
 
 (defn deflect (st new-bx paddle-top ph speed)
   "Bounce the ball off a paddle: pin it to the face at `new-bx`, reverse its
@@ -1263,7 +1263,7 @@ gets its own louder callout + shake + the charge glow."
         announced (cond
                     perfect? (announce deflected "PERFECT!" (get deflected :hue) *announce-life*)
                     loaded? (announce deflected "LOADED!" (get deflected :hue) *announce-life*)
-                    :else (rally-announce deflected r))
+                    else (rally-announce deflected r))
         hit (contact announced
               x
               (center by *ball-h*)
@@ -1312,7 +1312,7 @@ and `score` turns it into a point."
                   (+ lx *paddle-w*)
                   by)
       hit-right? (paddle-hit (assoc st :owner :right) (- rx *ball-w*) (get st :rp) rph rx by)
-      :else st)))
+      else st)))
 
 (defn point (st scorer)
   "Award a point to `scorer` (`:left`/`:right`). Resets the rally,
@@ -1363,7 +1363,7 @@ detonates the board + crowd finale."
     (cond
       (< (+ bx *ball-w*) 0) (point st :right)
       (> bx cols) (point st :left)
-      :else st)))
+      else st)))
 
 ;; ---- power-up tokens ----
 (defn spawn-powerup (st)
@@ -1436,7 +1436,7 @@ magazine. Assumes an owner exists."
                                               (str (get tok :name) "!")
                                               120
                                               *announce-life*)
-      :else (apply-effect-powerup st tok))))
+      else (apply-effect-powerup st tok))))
 
 (defn apply-effect-powerup (st tok)
   "Award a paddle-effect token to the ball's owner: add its timed effect to that
@@ -1518,7 +1518,7 @@ every target is a violent `*storm-max*` gale. Threads the PRNG."
                              mag (cond
                                    storm? *storm-max*
                                    (< p *wind-still-chance*) *wind-still*
-                                   :else *wind-max*))
+                                   else *wind-max*))
                          [(assoc st
                             :wind-tx (* (- (* 2 a) 1) mag)
                             :wind-ty (* (- (* 2 b) 1) mag)
@@ -1723,7 +1723,7 @@ between the streaker figure and the (effect-sized) paddle box."
     (cond
       (hits? (left-x) (get st :lp) (side-ph st :left rows)) :left
       (hits? (right-x cols) (get st :rp) (side-ph st :right rows)) :right
-      :else nil)))
+      else nil)))
 
 (defn streaker-splat-paddle (st side)
   "The streaker slams into a paddle: they SPLAT (killed) and that paddle is FROZEN
@@ -1759,7 +1759,7 @@ far side, rolling a fresh delay."
                   (assoc st :streaker nil :streaker-timer nt :s s2))
           pside (streaker-splat-paddle st1 pside)
           (streaker-hit? st1) (streaker-contact st1)
-          :else st1)))))
+          else st1)))))
 
 ;; ---- crowd signs ----
 (defn spawn-signs--acc (s n cols rows acc)
@@ -1821,7 +1821,7 @@ and start a fresh random show. Cosmetic only."
     (= kind :slowmo) "SLOW-MO!"
     (= kind :magnet) "MAGNET!"
     (= kind :tiny) "TINY PADDLES!"
-    :else "EVENT!"))
+    else "EVENT!"))
 
 (defn event-kind (st)
   "The active court-event kind, or nil."
@@ -2090,7 +2090,7 @@ the trail, particles, flash, crowd cheer, active effects, and floating tokens. P
   (cond
     (> (get st :freeze) 0) (step-frozen st)
     (> (get st :countdown) 0) (step-countdown st)
-    :else (let (hue (mod (+ (get st :hue) *hue-step*) 360)
+    else (let (hue (mod (+ (get st :hue) *hue-step*) 360)
                 w (step-wind (assoc st :hue hue))
                 m (move-ai w)
                 ev (event-kind st)
@@ -2400,7 +2400,7 @@ cells away (0 outside it)."
     (>= rally *wave-triple*) 3
     (>= rally *wave-double*) 2
     (>= rally *wave-threshold*) 1
-    :else 0))
+    else 0))
 
 (defn wave-lift-at (cx crests)
   "The strongest of the (possibly several) wave crests' bumps at column `cx`, so
@@ -2540,7 +2540,7 @@ bouncing BEACHBALL. Purely visual."
           (= kind :beachball) (let (bx (floor (* (- cols 4) (tri (/ t 90.0))))
                                     by (+ rows 1 (floor (* (- *crowd-rows* 4) (tri (/ t 23.0))))))
                                 [[:rect by bx 4 2 {:bg (hsv->rgb (mod (quot t 4) 360) 0.85 1.0)}]])
-          :else nil)))))
+          else nil)))))
 
 (defn sign-ops (st)
   "The held-up crowd placards: a coloured board with text, on a handle that
@@ -2669,7 +2669,7 @@ until it self-repairs. Never nil, never vanishes."
       (<= dmg 0) [[:rect top px w ph body]]
       (< dmg *paddle-hits-max*) (append [[:rect top px w ph body]] (crack-ops top px ph dmg))
       ;; DESTROYED: three chunks slid sideways with molten-red fracture seams between
-      :else (let (ch (max 1 (quot (- ph 2) 3)))
+      else (let (ch (max 1 (quot (- ph 2) 3)))
               (mapcat (fn (i)
                         (let (y (+ top (* i (+ ch 1)))
                               jit (- (mod (* (+ i 3) 7) 3) 1)
@@ -3012,7 +3012,7 @@ Anything else leaves the world be."
                   :r-shoot false
                   :l-loading false
                   :r-loading false)
-    :else st))
+    else st))
 
 (defn release-key (st k)
   "Apply a `[:key-up k]` RELEASE: halt the paddle that key was driving, or drop the
@@ -3026,7 +3026,7 @@ trigger / load that key was holding."
     (right-fire-key? k) (set-shoot st :right false)
     (left-load-key? k) (set-loading st :left false)
     (right-load-key? k) (set-loading st :right false)
-    :else st))
+    else st))
 
 (defn wait-ms (deadline)
   "Whole milliseconds from now until `deadline` (ns), floored at 0 — the
@@ -3054,7 +3054,7 @@ pause (so resuming doesn't fire a burst of catch-up ticks)."
     (and (> n 0) (> deadline now)) [st deadline]
     ;; safety cap: after a long stall, stop and resync rather than burst-spiral
     (>= n *max-catchup*) [st (+ now frame-ns)]
-    :else (advance-frame--acc (play-sounds! st (step st))
+    else (advance-frame--acc (play-sounds! st (step st))
             (+ deadline frame-ns) frame-ns now (+ n 1))))
 
 (defn advance-frame (st deadline)
@@ -3165,7 +3165,7 @@ catch-up ticks via `advance-frame`) and draws the result via `loop`."
     (m (cond
          (or (= m :close) (= m :ctrl-c)) (gui-close w)
          (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
-         :else (loop-wait w (press-key st m) deadline)))
+         else (loop-wait w (press-key st m) deadline)))
     (after (wait-ms deadline)
       (let ([st2 deadline2] (advance-frame st deadline))
         (if (get st2 :winner)
@@ -3252,7 +3252,7 @@ MENU (re-reading the window size), or QUIT the game."
   (cond
     (= sel 0) (loop w st (fresh-deadline))
     (= sel 1) (let ([c r] (gui-size w)) (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))
-    :else (gui-close w)))
+    else (gui-close w)))
 
 (defn pause-handle (w st sel tick deadline m)
   "Dispatch a pause keypress `m`: the window X quits, Esc / q resume (toggle off),
@@ -3263,7 +3263,7 @@ up/down move the highlight, ENTER/Space fire the action, anything else is ignore
     (menu-up? m) (pause-loop w st (mod (- sel 1) 3) tick deadline)
     (menu-down? m) (pause-loop w st (mod (+ sel 1) 3) tick deadline)
     (menu-select? m) (pause-act w st sel)
-    :else (pause-wait w st sel tick deadline)))
+    else (pause-wait w st sel tick deadline)))
 
 (defn pause-loop (w st sel tick deadline)
   "The match is FROZEN under the pause overlay: draw the held frame plus the overlay
@@ -3413,7 +3413,7 @@ highlight, ENTER/Space fire the action, anything else is ignored."
     (menu-up? m) (win-loop w st (mod (- sel 1) 2) tick deadline)
     (menu-down? m) (win-loop w st (mod (+ sel 1) 2) tick deadline)
     (menu-select? m) (win-act w st sel)
-    :else (win-wait w st sel tick deadline)))
+    else (win-wait w st sel tick deadline)))
 
 (defn win-loop (w st sel tick deadline)
   "The match is WON: the board, the loser and the crowd erupt in a rolling explosion
@@ -3444,7 +3444,7 @@ The DIFFICULTY step isn't a list — it's a 1–10 stepper (see `menu-difficulty
   (cond
     (= step :mode) [["PLAYER vs PLAYER" :pvp] ["PLAYER vs AI" :pve] ["AI vs AI" :eve]]
     (= step :points) [["FIRST TO 5" 5] ["FIRST TO 10" 10] ["FIRST TO 30" 30]]
-    :else []))
+    else []))
 
 (defn menu-step-title (step)
   "The prompt headline shown for menu `step`."
@@ -3453,7 +3453,7 @@ The DIFFICULTY step isn't a list — it's a 1–10 stepper (see `menu-difficulty
     (= step :difficulty) "AI DIFFICULTY"
     (= step :game) "GAME DIFFICULTY"
     (= step :points) "POINTS TO WIN"
-    :else ""))
+    else ""))
 
 (defn difficulty-descriptor (lvl)
   "A one-word flavour name for difficulty `lvl` (1–10), from pushover to merciless."
@@ -3467,7 +3467,7 @@ The DIFFICULTY step isn't a list — it's a 1–10 stepper (see `menu-difficulty
     (<= lvl 7) "TOUGH"
     (<= lvl 8) "HARD"
     (<= lvl 9) "BRUTAL"
-    :else "IMPOSSIBLE"))
+    else "IMPOSSIBLE"))
 
 (defn game-descriptor (lvl)
   "A one-word flavour name for GAME difficulty `lvl` (0–10): slow & item-free at 0,
@@ -3479,7 +3479,7 @@ standard at 5, all the way to 'insane-oo' at 10."
     (= lvl 5) "STANDARD"
     (<= lvl 7) "WILD"
     (<= lvl 9) "FRANTIC"
-    :else "INSANE-OO"))
+    else "INSANE-OO"))
 
 (defn choice-label (v)
   "A short human label for a chosen menu value (for the breadcrumb): a numeric
@@ -3489,7 +3489,7 @@ difficulty becomes `LEVEL n  DESCRIPTOR`, the mode keywords their full names."
     (= v :pve) "PLAYER vs AI"
     (= v :eve) "AI vs AI"
     (number? v) (str "LEVEL " v "  " (difficulty-descriptor v))
-    :else (str v)))
+    else (str v)))
 
 (defn menu-init (cols rows s)
   "A fresh opening menu on a `cols`×`rows` window, starting at the MODE step."
@@ -3515,7 +3515,7 @@ step's level (UP raises it, clamped, no wrap — AI difficulty 1–10, GAME diff
     (cond
       (= step :difficulty) (assoc menu :level (clamp (- (get menu :level) d) 1 10))
       (= step :game) (assoc menu :game-level (clamp (- (get menu :game-level) d) 0 10))
-      :else (let (n (max 1 (count (menu-step-options step))))
+      else (let (n (max 1 (count (menu-step-options step))))
               (assoc menu :sel (mod (+ (get menu :sel) d) n))))))
 
 (defn menu-confirm (menu)
@@ -3527,7 +3527,7 @@ sensible default when each new list step opens."
     (cond
       (= step :difficulty) (assoc menu :difficulty (get menu :level) :step :game)
       (= step :game) (assoc menu :game (get menu :game-level) :step :points :sel 1)
-      :else (let (opts (menu-step-options step)
+      else (let (opts (menu-step-options step)
                   choice (vector-ref (vector-ref opts (get menu :sel)) 1))
               (cond
                 (= step :mode) (assoc menu
@@ -3535,7 +3535,7 @@ sensible default when each new list step opens."
                                  :step (if (= choice :pvp) :game :difficulty)
                                  :sel 1)
                 (= step :points) (assoc menu :points choice :step :done)
-                :else menu)))))
+                else menu)))))
 
 (defn menu-text-op (cols row text scale fg)
   "A bold `text` op horizontally CENTRED on a `cols`-wide screen at `row`, drawn at
@@ -3656,7 +3656,7 @@ breadcrumb of the choices made, and the controls hint."
                                                 0
                                                 10
                                                 (game-descriptor (get menu :game-level)))
-                   :else (menu-option-ops menu cols rows))
+                   else (menu-option-ops menu cols rows))
         hint-ops [(menu-text-op cols
                     (round (* rows 0.92))
                     "W / S  or  UP / DOWN  to choose       ENTER select       ESC quit"
@@ -3707,7 +3707,7 @@ isn't compiled in or is muted."
                          (do
                            (beep! 700 45 0.14)
                            (menu-loop w menu2 deadline))))
-    :else (menu-wait w menu deadline)))
+    else (menu-wait w menu deadline)))
 
 (defn menu-loop (w menu deadline)
   "Draw the opening menu once, then hand off to `menu-wait`. As in `loop`, the draw

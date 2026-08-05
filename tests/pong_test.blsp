@@ -292,9 +292,9 @@
           ph (side-ph st :left (get st :rows))
           [t1 v1 h1] (human-step st :left ph 20 (get st :rows))
           [_ v2 _] (human-step (assoc st :l-vel v1 :l-hold h1) :left ph t1 (get st :rows)))
-      (is (> v1 0))                    ; it starts moving
-      (is (> v2 v1))                   ; and keeps speeding up
-      (is (> (- v2 v1) v1))))          ; the 2nd frame gains MORE than the 1st (ease-in)
+      (is (> v1 0)) ; it starts moving
+      (is (> v2 v1)) ; and keeps speeding up
+      (is (> (- v2 v1) v1)))) ; the 2nd frame gains MORE than the 1st (ease-in)
   (test "releasing drifts: it coasts on with decaying velocity, not a dead stop"
     (let (st (assoc (init 200 120 7 {:mode :pve :difficulty 5 :game 5 :points 11})
                :l-dir 0
@@ -352,11 +352,9 @@
     (let (rows 52
           top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
           calm (crowd-ops (assoc (init 200 60 7) :base-vx *ball-vx* :ball-mult 1.0 :cheer 0)
-                 200
-                 rows)
+                 200 rows)
           hyped (crowd-ops (assoc (init 200 60 7) :base-vx *charge-max* :ball-mult 2.0 :cheer 0)
-                  200
-                  rows))
+                  200 rows))
       ; it's a packed crowd, not a bar
       (is (> (count calm) 20))
       ; hyped reaches higher (smaller row)
@@ -557,10 +555,11 @@
   (test "hits crack the paddle incrementally; the *paddle-hits-max*th destroys it"
     (let (shot (fn (st)
                  (bullet-hits (assoc st
-                                :bullets [{:x (- (right-x 400) 1)
-                                           :y 50
-                                           :vx *bullet-speed*
-                                           :side :left}]
+                                :bullets
+                                  [{:x (- (right-x 400) 1)
+                                    :y 50
+                                    :vx *bullet-speed*
+                                    :side :left}]
                                 :rp 45)))
           d1 (shot (init 400 120 7))
           d2 (shot d1)
@@ -653,7 +652,6 @@
   (test "every show kind renders some ops"
     (is (every? (fn (k)
                   (> (count (crowd-show-ops (assoc (init 400 120 7) :show {:kind k :life 99})
-                              400
-                              100))
+                              400 100))
                     0))
           *shows*))))

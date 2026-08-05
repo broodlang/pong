@@ -265,10 +265,11 @@ keys preempt, then steps the world and recurses — the ADR-058 self-clocked loo
 ;; The catalog of tokens (sampled uniformly). Four good, four bad — height and
 ;; speed each come in a normal and an EXTREME flavour, for more variety.
 (def *powerups*
-  [{:kind :grow :good? true :name "GROW" :glyph "+"} {:kind :giant
-                                                      :good? true
-                                                      :name "GIANT"
-                                                      :glyph "G"}
+  [{:kind :grow :good? true :name "GROW" :glyph "+"}
+    {:kind :giant
+     :good? true
+     :name "GIANT"
+     :glyph "G"}
     {:kind :speed :good? true :name "SPEED" :glyph ">"}
     {:kind :turbo :good? true :name "TURBO" :glyph "T"}
     {:kind :shrink :good? false :name "SHRINK" :glyph "-"}
@@ -588,7 +589,8 @@ the form a face `:bg`/`:fg` takes. Standard sextant conversion."
     [(round-byte (* 255 r)) (round-byte (* 255 g)) (round-byte (* 255 b))]))
 
 ;; ---- particle explosions ----
-(defn spawn-burst--acc (s cx cy hue speed n acc)
+(defn- spawn-burst-acc
+  (s cx cy hue speed n acc)
   "Cons `n` random particles bursting from `(cx, cy)` onto `acc`, threading PRNG
 `s`; returns `[particles' s']`. Tail-recursive. Velocities are drawn from a
 square around the origin (no trig needed); `vx` is widened ×2 because a cell is
@@ -607,13 +609,13 @@ about half as wide as it is tall, so the spray reads round on screen."
              :life life
              :max life
              :hue (mod (+ hue (round (* 120 (- c 0.5)))) 360)})
-      (spawn-burst--acc s4 cx cy hue speed (- n 1) (cons p acc)))))
+      (spawn-burst-acc s4 cx cy hue speed (- n 1) (cons p acc)))))
 
 (defn spawn-burst (st cx cy n speed hue)
   "Add an `n`-particle explosion at court cell `(cx, cy)`, coloured around `hue`,
 to `st` — threading its PRNG. The new particles are newest-first, so the
 `*part-max*` cap in `step` drops the oldest."
-  (let ([ps s1] (spawn-burst--acc (get st :s) cx cy hue speed n (get st :particles)))
+  (let ([ps s1] (spawn-burst-acc (get st :s) cx cy hue speed n (get st :particles)))
     (assoc st :particles ps :s s1)))
 
 (defn contact (st x y hue-kick shake freeze n speed)
@@ -627,11 +629,7 @@ ball bright, and spawn an `n`-particle burst in the new hue. Threads the PRNG."
                    :shake (max (get st :shake) shake)
                    :freeze (max (get st :freeze) freeze)
                    :pop *pop-frames*)
-      x
-      y
-      n
-      speed
-      hue)))
+      x y n speed hue)))
 
 ;; ---- the announcer ----
 (defn announce (st text hue life)
@@ -1016,8 +1014,9 @@ ping-pongs, so it must catch the peak. An AI (only while DEFENDING) defers to
 `ai-charge?`."
   (cond
     (paddle-broken? st side) false
-    (= (get st (side-key side :l-ctrl :r-ctrl)) :human) (get st
-                                                          (side-key side :l-loading :r-loading))
+    (= (get st (side-key side :l-ctrl :r-ctrl)) :human)
+      (get st
+        (side-key side :l-loading :r-loading))
     (not defend) false
     else (ai-charge? st side ph paddle-top rows)))
 
@@ -1028,11 +1027,12 @@ falling). While `loading?` the charge OSCILLATES: it rises by `*load-rate*` to f
 catch the peak. `locked?` (released while stationary) HOLDS the banked charge. Otherwise
 it drains by `*load-decay*` toward 0 (direction reset)."
   (cond
-    loading? (let (n (+ cur (* dir *load-rate*)))
-               (cond
-                 (>= n 1.0) [1.0 -1]
-                 (<= n 0.0) [0.0 1]
-                 else [n dir]))
+    loading?
+      (let (n (+ cur (* dir *load-rate*)))
+        (cond
+          (>= n 1.0) [1.0 -1]
+          (<= n 0.0) [0.0 1]
+          else [n dir]))
     locked? [cur dir]
     else [(max 0.0 (- cur *load-decay*)) 1]))
 
@@ -1056,7 +1056,8 @@ survives while you hold the key or hold position (you can't bank it and then rep
     (assoc st
       (side-key side :l-load :r-load) load
       (side-key side :l-load-dir :r-load-dir) dir
-      (side-key side :l-locked? :r-locked?) (if dump? false (get st (side-key side :l-locked? :r-locked?))))))
+      (side-key side :l-locked? :r-locked?)
+        (if dump? false (get st (side-key side :l-locked? :r-locked?))))))
 
 (defn paddle-move (st side ph paddle-top rows defend frozen?)
   "The next `[top vel hold]` for `side` this frame (`hold` is the human ease-in frame
@@ -1166,38 +1167,30 @@ ball off the BOTTOM wall has a `*crash-chance*` to smash through into the crowd.
         cx (center (get st :bx) *ball-w*)
         floor (+ rows *crowd-rows*))
     (cond
-      (< by 0) (contact (assoc st :by (- 0 by) :vy (- 0 vy))
-                 cx
-                 0
-                 *wall-hue-kick*
-                 *wall-shake*
-                 0
-                 *wall-particles*
-                 *wall-speed*)
+      (< by 0)
+        (contact (assoc st :by (- 0 by) :vy (- 0 vy))
+          cx 0 *wall-hue-kick* *wall-shake* 0 *wall-particles* *wall-speed*)
       ;; the ball is DOWN IN THE STAND: carve through the crowd, bounce off the
       ;; stand floor, and return to play once it climbs back above the court line.
-      (get st :in-crowd) (let (st1 (splat-seat-under st))
-                           (cond
-                             (> (+ (get st1 :by) *ball-h*) floor) (assoc st1
-                                                                    :by (- floor *ball-h*)
-                                                                    :vy (- 0 (abs vy))
-                                                                    :shake (max (get st1 :shake)
-                                                                             *wall-shake*))
-                             (<= (+ (get st1 :by) *ball-h*) rows) (assoc st1 :in-crowd false)
-                             else st1))
-      (> (+ by *ball-h*) rows) (let ([roll s1] (rand-float (get st :s)))
-                                 (if (and (> (abs (get st :vx)) *crash-speed*)
-                                       (< roll *crash-chance*))
-                                   ; dive INTO the crowd (no reflect)
-                                   (crowd-crash (assoc st :s s1))
-                                   (contact (assoc st :by (- rows *ball-h*) :vy (- 0 vy) :s s1)
-                                     cx
-                                     rows
-                                     *wall-hue-kick*
-                                     *wall-shake*
-                                     0
-                                     *wall-particles*
-                                     *wall-speed*)))
+      (get st :in-crowd)
+        (let (st1 (splat-seat-under st))
+          (cond
+            (> (+ (get st1 :by) *ball-h*) floor)
+              (assoc st1
+                :by (- floor *ball-h*)
+                :vy (- 0 (abs vy))
+                :shake (max (get st1 :shake)
+                         *wall-shake*))
+            (<= (+ (get st1 :by) *ball-h*) rows) (assoc st1 :in-crowd false)
+            else st1))
+      (> (+ by *ball-h*) rows)
+        (let ([roll s1] (rand-float (get st :s)))
+          (if (and (> (abs (get st :vx)) *crash-speed*)
+                (< roll *crash-chance*))
+            ; dive INTO the crowd (no reflect)
+            (crowd-crash (assoc st :s s1))
+            (contact (assoc st :by (- rows *ball-h*) :vy (- 0 vy) :s s1)
+              cx rows *wall-hue-kick* *wall-shake* 0 *wall-particles* *wall-speed*)))
       else st)))
 
 (defn deflect (st new-bx paddle-top ph speed)
@@ -1257,9 +1250,10 @@ gets its own louder callout + shake + the charge glow."
                     loadk 0
                     dirk 1
                     lockedk false
-                    :charge-glow (if (or loaded? perfect?)
-                                   *charge-glow-frames*
-                                   (get st :charge-glow)))
+                    :charge-glow
+                      (if (or loaded? perfect?)
+                        *charge-glow-frames*
+                        (get st :charge-glow)))
         announced (cond
                     perfect? (announce deflected "PERFECT!" (get deflected :hue) *announce-life*)
                     loaded? (announce deflected "LOADED!" (get deflected :hue) *announce-life*)
@@ -1305,12 +1299,13 @@ and `score` turns it into a point."
                      (overlap? by (get st :rp) rph)))
     (cond
       ;; record the OWNER (this paddle now owns the ball for powerup pickups)
-      hit-left? (paddle-hit (assoc st :owner :left)
-                  (+ lx *paddle-w*)
-                  (get st :lp)
-                  lph
-                  (+ lx *paddle-w*)
-                  by)
+      hit-left?
+        (paddle-hit (assoc st :owner :left)
+          (+ lx *paddle-w*)
+          (get st :lp)
+          lph
+          (+ lx *paddle-w*)
+          by)
       hit-right? (paddle-hit (assoc st :owner :right) (- rx *ball-w*) (get st :rp) rph rx by)
       else st)))
 
@@ -1350,8 +1345,12 @@ detonates the board + crowd finale."
         ;; the celebration bursts from the COURT CENTRE, where the ball respawns — not
         ;; from the goal the ball left through, which planted a ball-sized cloud right
         ;; on the losing side's paddle and read as the ball spawning there
-        blasted (spawn-burst announced (/ (get st :cols) 2) (/ (get st :rows) 2)
-                  n *score-speed* hue))
+        blasted (spawn-burst announced
+                  (/ (get st :cols) 2)
+                  (/ (get st :rows) 2)
+                  n
+                  *score-speed*
+                  hue))
     ;; re-serve either way: an ordinary point starts a fresh spin-countdown, a win
     ;; parks it at centre (frozen — `win-loop` runs the finale and never steps)
     (serve blasted)))
@@ -1402,40 +1401,39 @@ magazine. Assumes an owner exists."
         akey (if (= owner :left) :l-ammo :r-ammo)
         k (get tok :kind))
     (cond
-      (= k :wind) (announce (spawn-burst (assoc st
-                                           :wind-gust *wind-gust-frames*
-                                           :shake (max (get st :shake) *hit-shake*))
-                              (get tok :x)
-                              (get tok :y)
-                              *hit-particles*
-                              *hit-speed*
-                              210)
-                    "STORM!"
-                    210
-                    *announce-life*)
-      (= k :ammo) (announce (spawn-burst (assoc st
-                                           akey (+ (get st akey) (gun-stat (gun-of st owner) :mag))
-                                           :pop *pop-frames*)
-                              (get tok :x)
-                              (get tok :y)
-                              *hit-particles*
-                              *hit-speed*
-                              120)
-                    "AMMO!"
-                    120
-                    *announce-life*)
-      (includes? [:pistol :smg :shotgun] k) (announce (spawn-burst (assoc st
-                                                                     gkey k
-                                                                     akey (gun-stat k :mag)
-                                                                     :pop *pop-frames*)
-                                                        (get tok :x)
-                                                        (get tok :y)
-                                                        *hit-particles*
-                                                        *hit-speed*
-                                                        120)
-                                              (str (get tok :name) "!")
-                                              120
-                                              *announce-life*)
+      (= k :wind)
+        (announce (spawn-burst (assoc st
+                                 :wind-gust *wind-gust-frames*
+                                 :shake (max (get st :shake) *hit-shake*))
+                    (get tok :x)
+                    (get tok :y)
+                    *hit-particles*
+                    *hit-speed*
+                    210)
+          "STORM!" 210 *announce-life*)
+      (= k :ammo)
+        (announce (spawn-burst (assoc st
+                                 akey (+ (get st akey) (gun-stat (gun-of st owner) :mag))
+                                 :pop *pop-frames*)
+                    (get tok :x)
+                    (get tok :y)
+                    *hit-particles*
+                    *hit-speed*
+                    120)
+          "AMMO!" 120 *announce-life*)
+      (includes? [:pistol :smg :shotgun] k)
+        (announce (spawn-burst (assoc st
+                                 gkey k
+                                 akey (gun-stat k :mag)
+                                 :pop *pop-frames*)
+                    (get tok :x)
+                    (get tok :y)
+                    *hit-particles*
+                    *hit-speed*
+                    120)
+          (str (get tok :name) "!")
+          120
+          *announce-life*)
       else (apply-effect-powerup st tok))))
 
 (defn apply-effect-powerup (st tok)
@@ -1455,9 +1453,7 @@ side, then announce + spark it (green for good, red for bad)."
                   :shake (max (get st :shake) *hit-shake*)
                   :pop *pop-frames*))
     (announce (spawn-burst powered (get tok :x) (get tok :y) *hit-particles* *hit-speed* hue)
-      text
-      hue
-      *announce-life*)))
+      text hue *announce-life*)))
 
 (defn collect-powerups (st)
   "Hand every token the ball is touching to its owner (apply + remove), leaving
@@ -1522,10 +1518,11 @@ every target is a violent `*storm-max*` gale. Threads the PRNG."
                          [(assoc st
                             :wind-tx (* (- (* 2 a) 1) mag)
                             :wind-ty (* (- (* 2 b) 1) mag)
-                            :s s3) (if storm?
-                                                                                                                                                                                               (quot *wind-period*
-                                                                                                                                                                                                 2)
-                                                                                                                                                                                               *wind-period*)]))
+                            :s s3)
+                           (if storm?
+                             (quot *wind-period*
+                               2)
+                             *wind-period*)]))
         ease (fn (cur tgt) (+ cur (* *wind-ease* (- tgt cur)))))
     (assoc st1
       :wind-x (ease (get st1 :wind-x) (get st1 :wind-tx))
@@ -1541,9 +1538,10 @@ court — the visible airflow."
         vx (+ *breeze* (* (get st :wind-x) *streak-scale*))
         vy (* (get st :wind-y) *streak-scale*))
     (assoc st
-      :streaks (map (fn (p)
-                      {:x (wrapf (+ (get p :x) vx) cols) :y (wrapf (+ (get p :y) vy) rows)})
-                 (get st :streaks)))))
+      :streaks
+        (map (fn (p)
+               {:x (wrapf (+ (get p :x) vx) cols) :y (wrapf (+ (get p :y) vy) rows)})
+          (get st :streaks)))))
 
 (defn init-streaks (cols rows)
   "A field of `*wind-streaks*` streaks scattered deterministically across the court."
@@ -1611,10 +1609,11 @@ column in the middle of the stand. Threads the PRNG."
         idx (+ (round (* ncols 0.2)) (round (* b (* ncols 0.6))))
         target (* idx *crowd-spacing*))
     (assoc st
-      :ufo {:x (if from-left? (- 0 *ufo-w*) cols)
-            :vx (if from-left? *ufo-speed* (- 0 *ufo-speed*))
-            :target target
-            :grabbed false}
+      :ufo
+        {:x (if from-left? (- 0 *ufo-w*) cols)
+         :vx (if from-left? *ufo-speed* (- 0 *ufo-speed*))
+         :target target
+         :grabbed false}
       :s s2)))
 
 (defn step-ufo (st)
@@ -1660,14 +1659,15 @@ figure at that seat — climbing up onto the court (`:vy`) toward a run height
         idx (round (* a (- ncols 1)))
         c (* idx *crowd-spacing*))
     (assoc st
-      :streaker {:x c
-                 :vx (if (< c (/ cols 2)) *streaker-speed* (- 0 *streaker-speed*))
-                 ; start at the court's bottom edge, body still in the stand
-                 :y rows
-                 :vy (- 0 *streaker-climb*)
-                 ; climb to this run height
-                 :ty (+ (* rows 0.38) (* b (* rows 0.34)))
-                 :bumped false}
+      :streaker
+        {:x c
+         :vx (if (< c (/ cols 2)) *streaker-speed* (- 0 *streaker-speed*))
+         ; start at the court's bottom edge, body still in the stand
+         :y rows
+         :vy (- 0 *streaker-climb*)
+         ; climb to this run height
+         :ty (+ (* rows 0.38) (* b (* rows 0.34)))
+         :bumped false}
       :abducted (cons {:col c :life *abduct-respawn*} (get st :abducted))
       :s s2)))
 
@@ -1755,14 +1755,16 @@ far side, rolling a fresh delay."
             gone? (or (< x2 (- 0 *streaker-w* 2)) (> x2 (+ (get st :cols) 2)))
             pside (streaker-paddle-hit st1))
         (cond
-          gone? (let ([nt s2] (next-streaker-timer (get st :s)))
-                  (assoc st :streaker nil :streaker-timer nt :s s2))
+          gone?
+            (let ([nt s2] (next-streaker-timer (get st :s)))
+              (assoc st :streaker nil :streaker-timer nt :s s2))
           pside (streaker-splat-paddle st1 pside)
           (streaker-hit? st1) (streaker-contact st1)
           else st1)))))
 
 ;; ---- crowd signs ----
-(defn spawn-signs--acc (s n cols rows acc)
+(defn- spawn-signs-acc
+  (s n cols rows acc)
   "Cons `n` random placards onto `acc` (text/hue/position/lifetime), threading the
 PRNG. Tail-recursive; returns `[signs s']`."
   (if (= n 0)
@@ -1779,13 +1781,13 @@ PRNG. Tail-recursive; returns `[signs s']`."
                 :hue (round (* a 360))
                 :life life
                 :max life})
-      (spawn-signs--acc s4 (- n 1) cols rows (cons sign acc)))))
+      (spawn-signs-acc s4 (- n 1) cols rows (cons sign acc)))))
 
 (defn spawn-signs (st)
   "Pop up a fresh batch of `*sign-min*`..`*sign-max*` placards across the stand."
   (let ([r s1] (rand-float (get st :s))
         n (+ *sign-min* (round (* r (- *sign-max* *sign-min*))))
-        [signs s2] (spawn-signs--acc s1 n (get st :cols) (get st :rows) (get st :signs)))
+        [signs s2] (spawn-signs-acc s1 n (get st :cols) (get st :rows) (get st :signs)))
     (assoc st :signs signs :s s2)))
 
 (defn step-signs (st)
@@ -1976,9 +1978,7 @@ fires a CRACK!/SHATTER! callout."
                           *score-particles*
                           *score-speed*
                           0)
-                "SPLAT!"
-                0
-                *announce-life*)
+                "SPLAT!" 0 *announce-life*)
               st1))
     (if (and (= ndl 0) (= ndr 0))
       st2
@@ -1989,11 +1989,7 @@ fires a CRACK!/SHATTER! callout."
         (announce (spawn-burst (assoc st2
                                  :shake (max (get st2 :shake) *hit-shake*)
                                  :pop *pop-frames*)
-                    hx
-                    hy
-                    *hit-particles*
-                    *hit-speed*
-                    0)
+                    hx hy *hit-particles* *hit-speed* 0)
           (if broke "SHATTER!" "CRACK!")
           0
           *announce-life*)))))
@@ -2042,8 +2038,9 @@ collection soon after; refreshing less often cuts that GC-driven frame-time jitt
 the particles, and decay flash/pop/shake/cheer/glow/announcer — then advance the
 cosmetic and event subsystems. Shared by the live `step` and the pre-serve countdown."
   (let (aged (assoc st
-               :trail (take *trail-len*
-                        (cons {:x (get st :bx) :y (get st :by) :hue hue} (get st :trail)))
+               :trail
+                 (take *trail-len*
+                   (cons {:x (get st :bx) :y (get st :by) :hue hue} (get st :trail)))
                :particles (step-particles (get st :particles))
                :flash (max 0 (- (get st :flash) 1))
                :pop (max 0 (- (get st :pop) 1))
@@ -2090,44 +2087,45 @@ the trail, particles, flash, crowd cheer, active effects, and floating tokens. P
   (cond
     (> (get st :freeze) 0) (step-frozen st)
     (> (get st :countdown) 0) (step-countdown st)
-    else (let (hue (mod (+ (get st :hue) *hue-step*) 360)
-                w (step-wind (assoc st :hue hue))
-                m (move-ai w)
-                ev (event-kind st)
-                ;; COURT-EVENT physics on the ball's velocity this frame
-                bcy (center (get m :by) *ball-h*)
-                gravity (if (= ev :gravity) *event-gravity* 0)
-                magnet (if (= ev :magnet)
-                         (* (if (< bcy (/ (get m :rows) 2)) 1 -1) *event-magnet*)
-                         0)
-                [quake s2] (if (= ev :quake)
-                             (let ([qr s1] (rand-float (get m :s)))
-                               [(* (- (* 2 qr) 1) *event-quake*) s1])
-                             [0 (get m :s)])
-                ;; the wind + event tweaks nudge the ball's velocity, curving its flight
-                vx (clamp-vx (+ (get m :vx) (get w :wind-x)))
-                vy (clamp (+ (get m :vy) (get w :wind-y) gravity magnet quake)
-                     (- 0 *max-vy*)
-                     *max-vy*)
-                ;; SLOW-MO scales the per-frame travel; an EARTHQUAKE holds a shake
-                scale (if (= ev :slowmo) *slowmo-scale* 1)
-                ;; GAME difficulty scales how far the ball travels per frame; split into
-                ;; `nsub` sub-steps each no longer than `*max-substep*` cells, so even a
-                ;; full-load rocket in insane mode can't tunnel a paddle (sized by the ball's
-                ;; actual x-travel this frame, not just `bmult`).
-                bmult (get m :ball-mult)
-                nsub (max 1 (ceil (/ (* (abs vx) scale bmult) *max-substep*)))
-                perstep (/ (* scale bmult) nsub)
-                b (assoc m
-                    :vx vx
-                    :vy vy
-                    :shake (if (= ev :quake)
-                             (max (get m :shake) *event-quake-shake*)
-                             (get m :shake))
-                    :s s2)
-                r (reduce (fn (s _) (advance-ball s perstep)) b (range nsub)))
-            ;; age this frame's cosmetics + advance the subsystems (shared with countdown)
-            (age-frame r hue))))
+    else
+      (let (hue (mod (+ (get st :hue) *hue-step*) 360)
+            w (step-wind (assoc st :hue hue))
+            m (move-ai w)
+            ev (event-kind st)
+            ;; COURT-EVENT physics on the ball's velocity this frame
+            bcy (center (get m :by) *ball-h*)
+            gravity (if (= ev :gravity) *event-gravity* 0)
+            magnet (if (= ev :magnet)
+                     (* (if (< bcy (/ (get m :rows) 2)) 1 -1) *event-magnet*)
+                     0)
+            [quake s2] (if (= ev :quake)
+                         (let ([qr s1] (rand-float (get m :s)))
+                           [(* (- (* 2 qr) 1) *event-quake*) s1])
+                         [0 (get m :s)])
+            ;; the wind + event tweaks nudge the ball's velocity, curving its flight
+            vx (clamp-vx (+ (get m :vx) (get w :wind-x)))
+            vy (clamp (+ (get m :vy) (get w :wind-y) gravity magnet quake)
+                 (- 0 *max-vy*)
+                 *max-vy*)
+            ;; SLOW-MO scales the per-frame travel; an EARTHQUAKE holds a shake
+            scale (if (= ev :slowmo) *slowmo-scale* 1)
+            ;; GAME difficulty scales how far the ball travels per frame; split into
+            ;; `nsub` sub-steps each no longer than `*max-substep*` cells, so even a
+            ;; full-load rocket in insane mode can't tunnel a paddle (sized by the ball's
+            ;; actual x-travel this frame, not just `bmult`).
+            bmult (get m :ball-mult)
+            nsub (max 1 (ceil (/ (* (abs vx) scale bmult) *max-substep*)))
+            perstep (/ (* scale bmult) nsub)
+            b (assoc m
+                :vx vx
+                :vy vy
+                :shake (if (= ev :quake)
+                         (max (get m :shake) *event-quake-shake*)
+                         (get m :shake))
+                :s s2)
+            r (reduce (fn (s _) (advance-ball s perstep)) b (range nsub)))
+        ;; age this frame's cosmetics + advance the subsystems (shared with countdown)
+        (age-frame r hue))))
 
 ;; ---- the initial world ----
 (defn init (cols rows s & opts)
@@ -2303,7 +2301,8 @@ net mesh filling each mouth, with bright posts framing it top and bottom."
                     (map (fn (y) [:rect y rx0 rw 1 mesh]) (range 0 rows 4))))
     (append left-net
       right-net
-      [[:rect 0 0 lx 1 post] [:rect (- rows 1) 0 lx 1 post]
+      [[:rect 0 0 lx 1 post]
+        [:rect (- rows 1) 0 lx 1 post]
         [:rect 0 rx0 rw 1 post]
         [:rect (- rows 1) rx0 rw 1 post]])))
 
@@ -2314,7 +2313,8 @@ its own freshest trail."
   (let (n (count trail))
     (reverse (first (reduce (fn ([ops i] t)
                               (let (f (- 1 (/ i (max 1 n)))
-                                    op [:rect (floor (get t :y))
+                                    op [:rect
+                                         (floor (get t :y))
                                          (floor (get t :x))
                                          *ball-w*
                                          *ball-h*
@@ -2328,7 +2328,8 @@ its own freshest trail."
 its brightness fading with its remaining life."
   (map (fn (p)
          (let (f (/ (get p :life) (max 1 (get p :max))))
-           [:rect (floor (get p :y))
+           [:rect
+             (floor (get p :y))
              (floor (get p :x))
              2
              1
@@ -2352,14 +2353,22 @@ saturated rounded BODY with a bright rim, a SHEEN highlight across its top, and 
 white `glyph` centred."
   (let (gs (max 1 (- *powerup-h* 2))
         ;; a round halo one cell larger all round, pulsing with the throb
-        glow (disc-ops (- ty 1) (- tx 1) (+ *powerup-w* 2) (+ *powerup-h* 2)
+        glow (disc-ops (- ty 1)
+               (- tx 1)
+               (+ *powerup-w* 2)
+               (+ *powerup-h* 2)
                {:bg (hsv->rgb hue 0.7 (* 0.3 throb))})
         ;; the rounded body
         body (disc-ops ty tx *powerup-w* *powerup-h* {:bg (hsv->rgb hue 0.85 throb)})
         ;; a short bright highlight strip near the top for the gloss
-        sheen [:rect (+ ty 1) (+ tx 2) (max 1 (- *powerup-w* 4)) 1
+        sheen [:rect
+                (+ ty 1)
+                (+ tx 2)
+                (max 1 (- *powerup-w* 4))
+                1
                 {:bg (hsv->rgb hue 0.3 (min 1.0 (+ 0.45 throb)))}]
-        glyph-op [:text (+ ty (floor (/ (- *powerup-h* gs) 2)))
+        glyph-op [:text
+                   (+ ty (floor (/ (- *powerup-h* gs) 2)))
                    (+ tx (floor (/ (- *powerup-w* gs) 2)))
                    glyph
                    {:scale gs :fg [255 255 255] :bold true}])
@@ -2497,7 +2506,8 @@ while its beam reaches its target — a faint green tractor beam down into the s
             light-l [:rect (+ uy 1) (+ x 1) 1 1 {:bg blink}]
             light-r [:rect (+ uy 1) (+ x (- *ufo-w* 2)) 1 1 {:bg blink}]
             beam (if beam?
-                   [[:rect (+ uy 2)
+                   [[:rect
+                      (+ uy 2)
                       (- (get ufo :target) 1)
                       3
                       (- (+ rows *crowd-rows*) (+ uy 2))
@@ -2515,31 +2525,37 @@ bouncing BEACHBALL. Purely visual."
       (let (t (get st :t)
             kind (get show :kind))
         (cond
-          (= kind :lights) (map
-                             (fn (col)
-                               ;; a SOFT twinkle: each light gently pulses (smooth
-                               ;; `tri`, per-column phase) — not a hard on/off strobe
-                               (let (b (+ 0.22 (* 0.55 (tri (/ (+ t (mod (* col 53) 30)) 26.0)))))
-                                 [:rect (+ rows 1) col 1 1 {:bg (hsv->rgb 48 0.16 b)}]))
-                             (range 0 cols 3))
-          (= kind :birds) (mapcat (fn (i)
-                                    (let (x (floor (- (wrapf (+ (* t 1.3) (* i 17)) (+ cols 30)) 15))
-                                          y (+ (- rows 6) (mod (+ i (quot t 10)) 2)))
-                                      [[:rect y x 1 1 {:bg [40 40 55]}] [:rect (- y 1)
-                                                                          (+ x 1)
-                                                                          1
-                                                                          1
-                                                                          {:bg [40 40 55]}]
-                                        [:rect y (+ x 2) 1 1 {:bg [40 40 55]}]]))
-                            (range *bird-count*))
-          (= kind :confetti) (map (fn (i)
-                                    (let (x (mod (* i 89) cols)
-                                          y (+ rows (mod (+ (* i 41) t) *crowd-rows*)))
-                                      [:rect y x 1 1 {:bg (hsv->rgb (mod (* i 47) 360) 0.9 0.95)}]))
-                               (range *confetti-count*))
-          (= kind :beachball) (let (bx (floor (* (- cols 4) (tri (/ t 90.0))))
-                                    by (+ rows 1 (floor (* (- *crowd-rows* 4) (tri (/ t 23.0))))))
-                                [[:rect by bx 4 2 {:bg (hsv->rgb (mod (quot t 4) 360) 0.85 1.0)}]])
+          (= kind :lights)
+            (map
+              (fn (col)
+                ;; a SOFT twinkle: each light gently pulses (smooth
+                ;; `tri`, per-column phase) — not a hard on/off strobe
+                (let (b (+ 0.22 (* 0.55 (tri (/ (+ t (mod (* col 53) 30)) 26.0)))))
+                  [:rect (+ rows 1) col 1 1 {:bg (hsv->rgb 48 0.16 b)}]))
+              (range 0 cols 3))
+          (= kind :birds)
+            (mapcat (fn (i)
+                      (let (x (floor (- (wrapf (+ (* t 1.3) (* i 17)) (+ cols 30)) 15))
+                            y (+ (- rows 6) (mod (+ i (quot t 10)) 2)))
+                        [[:rect y x 1 1 {:bg [40 40 55]}]
+                          [:rect
+                            (- y 1)
+                            (+ x 1)
+                            1
+                            1
+                            {:bg [40 40 55]}]
+                          [:rect y (+ x 2) 1 1 {:bg [40 40 55]}]]))
+              (range *bird-count*))
+          (= kind :confetti)
+            (map (fn (i)
+                   (let (x (mod (* i 89) cols)
+                         y (+ rows (mod (+ (* i 41) t) *crowd-rows*)))
+                     [:rect y x 1 1 {:bg (hsv->rgb (mod (* i 47) 360) 0.9 0.95)}]))
+              (range *confetti-count*))
+          (= kind :beachball)
+            (let (bx (floor (* (- cols 4) (tri (/ t 90.0))))
+                  by (+ rows 1 (floor (* (- *crowd-rows* 4) (tri (/ t 23.0))))))
+              [[:rect by bx 4 2 {:bg (hsv->rgb (mod (quot t 4) 360) 0.85 1.0)}]])
           else nil)))))
 
 (defn sign-ops (st)
@@ -2588,7 +2604,8 @@ effect's `:life` runs down — so you can see what's active and for how much lon
         frac (/ (get eff :life) *fx-life*)
         gs (max 1 (- *fx-badge-h* 2))
         body [:rect row x *fx-badge-w* *fx-badge-h* {:bg (hsv->rgb hue 0.8 0.85)}]
-        glyph [:text (+ row (floor (/ (- *fx-badge-h* gs) 2)))
+        glyph [:text
+                (+ row (floor (/ (- *fx-badge-h* gs) 2)))
                 (+ x (floor (/ (- *fx-badge-w* gs) 2)))
                 (get eff :glyph)
                 {:scale gs :fg [255 255 255] :bold true}]
@@ -2621,13 +2638,15 @@ side's top-right — each counting its remaining time down."
 (bright yellow when armed, dim when empty), and a row of pips run inward."
   (let (badge (fn (gun n x pip-dir)
                 (let (col (if (> n 0) [255 232 110] [96 96 116]))
-                  (append [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}] [:text 1
-                                                                                                       (+ x
-                                                                                                         4)
-                                                                                                       (str n)
-                                                                                                       {:scale 4
-                                                                                                        :fg col
-                                                                                                        :bold true}]]
+                  (append [[:text 1 x (gun-stat gun :glyph) {:scale 4 :fg [210 220 235] :bold true}]
+                            [:text
+                              1
+                              (+ x
+                                4)
+                              (str n)
+                              {:scale 4
+                               :fg col
+                               :bold true}]]
                     ;; pips trailing inward, one per shot (capped so they don't run on)
                     (map (fn (i) [:rect 5 (+ x (* pip-dir (* (+ i 1) 3))) 2 1 {:bg col}])
                       (range (min n 14)))))))
@@ -2651,11 +2670,13 @@ clean cut or a see-through gap."
             (let (y (+ top (round (* ph (/ (+ i 1) (+ n 1)))))
                   s (mod (+ i 1) 2)
                   seam {:bg [24 20 26]})
-              [[:rect y (+ px s) (- *paddle-w* s) 1 seam] [:rect (+ y 1)
-                                                            px
-                                                            (- *paddle-w* (- 1 s))
-                                                            1
-                                                            seam]]))
+              [[:rect y (+ px s) (- *paddle-w* s) 1 seam]
+                [:rect
+                  (+ y 1)
+                  px
+                  (- *paddle-w* (- 1 s))
+                  1
+                  seam]]))
     (range n)))
 
 (defn paddle-render-ops (top px ph face dmg)
@@ -2669,15 +2690,16 @@ until it self-repairs. Never nil, never vanishes."
       (<= dmg 0) [[:rect top px w ph body]]
       (< dmg *paddle-hits-max*) (append [[:rect top px w ph body]] (crack-ops top px ph dmg))
       ;; DESTROYED: three chunks slid sideways with molten-red fracture seams between
-      else (let (ch (max 1 (quot (- ph 2) 3)))
-              (mapcat (fn (i)
-                        (let (y (+ top (* i (+ ch 1)))
-                              jit (- (mod (* (+ i 3) 7) 3) 1)
-                              chunk [:rect y (+ px jit) w ch body])
-                          (if (< i 2)
-                            [chunk [:rect (+ y ch) px w 1 {:bg [235 120 60]}]]
-                            [chunk])))
-                (range 3))))))
+      else
+        (let (ch (max 1 (quot (- ph 2) 3)))
+          (mapcat (fn (i)
+                    (let (y (+ top (* i (+ ch 1)))
+                          jit (- (mod (* (+ i 3) 7) 3) 1)
+                          chunk [:rect y (+ px jit) w ch body])
+                      (if (< i 2)
+                        [chunk [:rect (+ y ch) px w 1 {:bg [235 120 60]}]]
+                        [chunk])))
+            (range 3))))))
 
 (defn announce-ops (st cols rows)
   "The announcer callout: big bold centred text that PUNCHES in (a touch larger
@@ -2721,14 +2743,16 @@ of blocky. One `[:rect …]` per row, all in `face`. Shared by the ball and the 
 badges."
   (let (hw (/ w 2.0)
         hh (/ h 2.0))
-    (map (fn (r)
-           (let (;; this row's centre distance from the middle, 0 (centre) … 1 (edge)
-                 dy (if (<= h 1) 0 (/ (abs (- (+ r 0.5) hh)) hh))
-                 ;; the ellipse's half-width at that height ⇒ how far to inset the row
-                 half (* hw (sqrt (max 0 (- 1 (* dy dy)))))
-                 inset (max 0 (round (- hw half)))
-                 iw (max 1 (- w (* 2 inset))))
-             [:rect (+ top r) (+ left inset) iw 1 face]))
+    (map
+      (fn (r)
+        (let (
+              ;; this row's centre distance from the middle, 0 (centre) … 1 (edge)
+              dy (if (<= h 1) 0 (/ (abs (- (+ r 0.5) hh)) hh))
+              ;; the ellipse's half-width at that height ⇒ how far to inset the row
+              half (* hw (sqrt (max 0 (- 1 (* dy dy)))))
+              inset (max 0 (round (- hw half)))
+              iw (max 1 (- w (* 2 inset))))
+          [:rect (+ top r) (+ left inset) iw 1 face]))
       (range h))))
 
 (defn ball-op (st hue)
@@ -2820,7 +2844,8 @@ the ball over `*charge-glow-frames*` — the visible kick of a loaded hit."
             top (- by ring)
             left (- bx ring))
         ;; four bars forming a hollow ring around the ball
-        [[:rect top left w 1 {:bg col}] [:rect (+ top h -1) left w 1 {:bg col}]
+        [[:rect top left w 1 {:bg col}]
+          [:rect (+ top h -1) left w 1 {:bg col}]
           [:rect top left 1 h {:bg col}]
           [:rect top (+ left w -1) 1 h {:bg col}]]))))
 
@@ -3005,13 +3030,14 @@ Anything else leaves the world be."
     (right-fire-key? k) (set-shoot st :right true)
     (left-load-key? k) (set-loading st :left true)
     (right-load-key? k) (set-loading st :right true)
-    (= k :blur) (assoc st
-                  :l-dir 0
-                  :r-dir 0
-                  :l-shoot false
-                  :r-shoot false
-                  :l-loading false
-                  :r-loading false)
+    (= k :blur)
+      (assoc st
+        :l-dir 0
+        :r-dir 0
+        :l-shoot false
+        :r-shoot false
+        :l-loading false
+        :r-loading false)
     else st))
 
 (defn release-key (st k)
@@ -3046,7 +3072,8 @@ frame's work took (so motion doesn't speed up / drift when a frame is cheap)."
 pause (so resuming doesn't fire a burst of catch-up ticks)."
   (+ (now-ns) (* *frame-ms* 1000000)))
 
-(defn advance-frame--acc (st deadline frame-ns now n)
+(defn- advance-frame-acc
+  (st deadline frame-ns now n)
   (cond
     ;; a match-ending tick stops the catch-up immediately (win-loop takes over)
     (get st :winner) [st deadline]
@@ -3054,8 +3081,11 @@ pause (so resuming doesn't fire a burst of catch-up ticks)."
     (and (> n 0) (> deadline now)) [st deadline]
     ;; safety cap: after a long stall, stop and resync rather than burst-spiral
     (>= n *max-catchup*) [st (+ now frame-ns)]
-    else (advance-frame--acc (play-sounds! st (step st))
-            (+ deadline frame-ns) frame-ns now (+ n 1))))
+    else (advance-frame-acc (play-sounds! st (step st))
+           (+ deadline frame-ns)
+           frame-ns
+           now
+           (+ n 1))))
 
 (defn advance-frame (st deadline)
   "Advance the FIXED-TIMESTEP world to catch up to real time: run one `step` per
@@ -3063,7 +3093,7 @@ pause (so resuming doesn't fire a burst of catch-up ticks)."
 Returns `[st' next-deadline]`. This decouples game SPEED from render frame-rate — a
 slow frame runs extra ticks instead of moving the ball less — so the ball never
 appears to slow down or its speed jitter when frames run long."
-  (advance-frame--acc st deadline (* *frame-ms* 1000000) (now-ns) 0))
+  (advance-frame-acc st deadline (* *frame-ms* 1000000) (now-ns) 0))
 
 (defn pause-trigger? (m)
   "Does keypress `m` request a PAUSE — Esc or q? (Neither quits outright; both open
@@ -3208,7 +3238,8 @@ players' keys with who drives each side."
                                    bar (if active
                                          (let (w (+ (* (string-length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
-                                           [[:rect (- row 1)
+                                           [[:rect
+                                              (- row 1)
                                               c
                                               w
                                               (+ sc 2)
@@ -3219,32 +3250,34 @@ players' keys with who drives each side."
         cscale (max 1 (round (* rows 0.023)))
         clh (+ cscale 3)
         crow (+ py (round (* ph 0.7)))
-        controls [(menu-text-op cols crow "CONTROLS" cscale [150 160 185]) (menu-text-op cols
-                                                                             (+ crow clh)
-                                                                             (str "LEFT   MOVE W / S   LOAD D   SHOOT SPACE   "
-                                                                               (pause-ctrl-tag st
-                                                                                 :left))
-                                                                             cscale
-                                                                             [120 200 230])
+        controls [(menu-text-op cols crow "CONTROLS" cscale [150 160 185])
+                   (menu-text-op cols
+                     (+ crow clh)
+                     (str "LEFT   MOVE W / S   LOAD D   SHOOT SPACE   "
+                       (pause-ctrl-tag st
+                         :left))
+                     cscale
+                     [120 200 230])
                    (menu-text-op cols
                      (+ crow (* 2 clh))
                      (str "RIGHT   MOVE UP / DOWN   LOAD .   SHOOT ENTER   "
                        (pause-ctrl-tag st :right))
                      cscale
                      [230 150 200])])
-    (append [[:rect (- py 1) (- px 1) (+ pw 2) (+ ph 2) {:bg (hsv->rgb hue 0.5 0.8)}] [:rect py
-                                                                                        px
-                                                                                        pw
-                                                                                        ph
-                                                                                        {:bg [14 16
-                                                                                               28]}]
+    (append [[:rect (- py 1) (- px 1) (+ pw 2) (+ ph 2) {:bg (hsv->rgb hue 0.5 0.8)}]
+              [:rect
+                py
+                px
+                pw
+                ph
+                {:bg [14
+                       16 28]}]
               (menu-text-op cols
                 (+ py (round (* ph 0.08)))
                 "PAUSED"
                 (min 16 (max 2 (round (* rows 0.07))))
                 (hsv->rgb hue 0.4 1.0))]
-      option-ops
-      controls)))
+      option-ops controls)))
 
 (defn pause-act (w st sel)
   "Carry out the highlighted pause action: RESUME the match, drop to a fresh MAIN
@@ -3344,7 +3377,8 @@ barred + brighter)."
                                    bar (if active
                                          (let (w (+ (* (string-length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
-                                           [[:rect (- row 1)
+                                           [[:rect
+                                              (- row 1)
                                               c
                                               w
                                               (+ sc 2)
@@ -3356,20 +3390,21 @@ barred + brighter)."
                (round (* rows 0.28))
                name
                (min 16 (max 2 (round (* rows 0.12))))
-               wcol) (menu-text-op cols
-                                                                                                                                                                      (round (* rows
-                                                                                                                                                                               0.48))
-                                                                                                                                                                      (str (get st
-                                                                                                                                                                             :ls)
-                                                                                                                                                                        " - "
-                                                                                                                                                                        (get st
-                                                                                                                                                                          :rs))
-                                                                                                                                                                      (min 12
-                                                                                                                                                                        (max 2
-                                                                                                                                                                          (round (* rows
-                                                                                                                                                                                   0.055))))
-                                                                                                                                                                      [240 240
-                                                                                                                                                                        255])]
+               wcol)
+              (menu-text-op cols
+                (round (* rows
+                         0.48))
+                (str (get st
+                       :ls)
+                  " - "
+                  (get st
+                    :rs))
+                (min 12
+                  (max 2
+                    (round (* rows
+                             0.055))))
+                [240
+                  240 255])]
       option-ops)))
 
 (defn win-render (st sel)
@@ -3393,8 +3428,9 @@ the announce."
       :shake (* (get st1 :shake) *shake-decay*)
       :cheer *cheer-frames*
       :announce-life (max 0 (- (get st1 :announce-life) 1))
-      :abducted (filter (fn (a) (> (get a :life) 0))
-                  (map (fn (a) (assoc a :life (- (get a :life) 1))) (get st1 :abducted))))))
+      :abducted
+        (filter (fn (a) (> (get a :life) 0))
+          (map (fn (a) (assoc a :life (- (get a :life) 1))) (get st1 :abducted))))))
 
 (defn win-act (w st sel)
   "Carry out the chosen win-screen action (re-reading the window size): RETRY plays
@@ -3515,8 +3551,9 @@ step's level (UP raises it, clamped, no wrap — AI difficulty 1–10, GAME diff
     (cond
       (= step :difficulty) (assoc menu :level (clamp (- (get menu :level) d) 1 10))
       (= step :game) (assoc menu :game-level (clamp (- (get menu :game-level) d) 0 10))
-      else (let (n (max 1 (count (menu-step-options step))))
-              (assoc menu :sel (mod (+ (get menu :sel) d) n))))))
+      else
+        (let (n (max 1 (count (menu-step-options step))))
+          (assoc menu :sel (mod (+ (get menu :sel) d) n))))))
 
 (defn menu-confirm (menu)
   "Record the current step's choice and advance through the flow: MODE → AI
@@ -3527,15 +3564,17 @@ sensible default when each new list step opens."
     (cond
       (= step :difficulty) (assoc menu :difficulty (get menu :level) :step :game)
       (= step :game) (assoc menu :game (get menu :game-level) :step :points :sel 1)
-      else (let (opts (menu-step-options step)
-                  choice (vector-ref (vector-ref opts (get menu :sel)) 1))
-              (cond
-                (= step :mode) (assoc menu
-                                 :mode choice
-                                 :step (if (= choice :pvp) :game :difficulty)
-                                 :sel 1)
-                (= step :points) (assoc menu :points choice :step :done)
-                else menu)))))
+      else
+        (let (opts (menu-step-options step)
+              choice (vector-ref (vector-ref opts (get menu :sel)) 1))
+          (cond
+            (= step :mode)
+              (assoc menu
+                :mode choice
+                :step (if (= choice :pvp) :game :difficulty)
+                :sel 1)
+            (= step :points) (assoc menu :points choice :step :done)
+            else menu)))))
 
 (defn menu-text-op (cols row text scale fg)
   "A bold `text` op horizontally CENTRED on a `cols`-wide screen at `row`, drawn at
@@ -3642,20 +3681,22 @@ breadcrumb of the choices made, and the controls hint."
                        [150 160 185])]
                     nil)
         body-ops (cond
-                   (= (get menu :step) :difficulty) (menu-stepper-ops menu
-                                                      cols
-                                                      rows
-                                                      (get menu :level)
-                                                      1
-                                                      10
-                                                      (difficulty-descriptor (get menu :level)))
-                   (= (get menu :step) :game) (menu-stepper-ops menu
-                                                cols
-                                                rows
-                                                (get menu :game-level)
-                                                0
-                                                10
-                                                (game-descriptor (get menu :game-level)))
+                   (= (get menu :step) :difficulty)
+                     (menu-stepper-ops menu
+                       cols
+                       rows
+                       (get menu :level)
+                       1
+                       10
+                       (difficulty-descriptor (get menu :level)))
+                   (= (get menu :step) :game)
+                     (menu-stepper-ops menu
+                       cols
+                       rows
+                       (get menu :game-level)
+                       0
+                       10
+                       (game-descriptor (get menu :game-level)))
                    else (menu-option-ops menu cols rows))
         hint-ops [(menu-text-op cols
                     (round (* rows 0.92))
@@ -3698,15 +3739,16 @@ isn't compiled in or is muted."
     (quit? m) (gui-close w)
     (menu-up? m) (do (beep! 520 18 0.12) (menu-loop w (menu-move menu -1) deadline))
     (menu-down? m) (do (beep! 470 18 0.12) (menu-loop w (menu-move menu 1) deadline))
-    (menu-select? m) (let (menu2 (menu-confirm menu))
-                       (if (= (get menu2 :step) :done)
-                         (do
-                           (beep! 784 60 0.16)
-                           (beep! 1047 110 0.16)
-                           (start-match w menu2))
-                         (do
-                           (beep! 700 45 0.14)
-                           (menu-loop w menu2 deadline))))
+    (menu-select? m)
+      (let (menu2 (menu-confirm menu))
+        (if (= (get menu2 :step) :done)
+          (do
+            (beep! 784 60 0.16)
+            (beep! 1047 110 0.16)
+            (start-match w menu2))
+          (do
+            (beep! 700 45 0.14)
+            (menu-loop w menu2 deadline))))
     else (menu-wait w menu deadline)))
 
 (defn menu-loop (w menu deadline)

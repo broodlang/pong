@@ -1,9 +1,18 @@
 # Brood package cache — regenerable from project.lock.blsp (which is committed)
 _deps/
 
-# Editor / OS cruft
+# Editor / OS cruft — Emacs autosaves (#file#), backups (file~), lock files (.#file)
 *.swp
 .DS_Store
+\#*\#
+*~
+.\#*
 
 # Brood crash dump
 .brood_crash_dump
+
+# Startup image cache (ADR-218) — rebuilt on demand
+/.brood/
+
+# Stray `cargo install --root .local` output — the real binary lives on PATH
+/.local/

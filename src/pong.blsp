@@ -2570,7 +2570,7 @@ and fading over its final frames."
       (fn (sg)
         (let (text (get sg :text)
               sc *sign-scale*
-              w (+ (* (string-length text) sc) 2)
+              w (+ (* (string/length text) sc) 2)
               h (+ sc 2)
               ; gentle wave of the board
               bob (mod (+ (get sg :x) (quot t 8)) 2)
@@ -2713,7 +2713,7 @@ callout is live."
       (let (f (/ life (max 1 (get st :announce-max)))
             scale (max 1 (min 16 (round (* *announce-scale* (+ 0.85 (* 0.35 f))))))
             val (min 1.0 (* 1.3 f))
-            len (string-length text)
+            len (string/length text)
             col (max 0 (- (floor (/ cols 2)) (floor (/ (* len scale) 2))))
             row (max 0 (- (floor (/ rows 3)) (floor (/ scale 2))))
             face {:bold true :scale scale :fg (hsv->rgb (get st :announce-hue) 0.3 val)})
@@ -2892,7 +2892,7 @@ the spinning ball, punching bigger as each second ticks over. Nil once released.
             scale (max 2 (min 22 (round (* *announce-scale* (+ 1.1 (* 0.7 f))))))
             text (str secs)
             hue (mod (get st :hue) 360)
-            col (max 0 (- (floor (/ cols 2)) (floor (/ (* (string-length text) scale) 2))))
+            col (max 0 (- (floor (/ cols 2)) (floor (/ (* (string/length text) scale) 2))))
             row (max 0 (- (floor (/ rows 3)) (floor (/ scale 2)))))
         [[:text row col text {:bold true :scale scale :fg (hsv->rgb hue 0.35 1.0)}]]))))
 
@@ -3237,7 +3237,7 @@ players' keys with who drives each side."
                                    h2 (mod (+ hue (* i 50)) 360)
                                    fg (if active (hsv->rgb h2 0.4 1.0) [120 130 155])
                                    bar (if active
-                                         (let (w (+ (* (string-length label) sc) 6)
+                                         (let (w (+ (* (string/length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
                                            [[:rect
                                               (- row 1)
@@ -3376,7 +3376,7 @@ barred + brighter)."
                                    h2 (mod (+ hue (* i 60)) 360)
                                    fg (if active (hsv->rgb h2 0.4 1.0) [130 140 165])
                                    bar (if active
-                                         (let (w (+ (* (string-length label) sc) 6)
+                                         (let (w (+ (* (string/length label) sc) 6)
                                                c (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
                                            [[:rect
                                               (- row 1)
@@ -3580,7 +3580,7 @@ sensible default when each new list step opens."
 (defn menu-text-op (cols row text scale fg)
   "A bold `text` op horizontally CENTRED on a `cols`-wide screen at `row`, drawn at
 `scale`."
-  (let (col (max 0 (- (floor (/ cols 2)) (floor (/ (* (string-length text) scale) 2)))))
+  (let (col (max 0 (- (floor (/ cols 2)) (floor (/ (* (string/length text) scale) 2)))))
     [:text row col text {:scale scale :fg fg :bold true}]))
 
 (defn menu-option-ops (menu cols rows)
@@ -3601,7 +3601,7 @@ and lit in a rainbow hue over a soft bar, the rest small and dim."
                     fg (if active (hsv->rgb hue 0.4 1.0) [110 120 145])
                     txt (menu-text-op cols row label sc fg)
                     bar (if active
-                          (let (w (+ (* (string-length label) sc) 8)
+                          (let (w (+ (* (string/length label) sc) 8)
                                 col (max 0 (- (floor (/ cols 2)) (floor (/ w 2)))))
                             [[:rect (- row 2) col w (+ sc 4) {:bg (hsv->rgb hue 0.6 0.22)}]])
                           nil))

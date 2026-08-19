@@ -10,9 +10,9 @@ the `nest run` entry by default (module `main`, fn `main`)."
   ;; fire-and-forget, and one process serialises every write, so lines never
   ;; interleave). The default backend writes to stdout at :info and up.
   (start-logger)
-  (log-info "starting pong")
+  (log/info "starting pong")
   ;; Add backends to fan output out — e.g. to a file, or to a process that
-  ;; owns a buffer (an editor's *Messages*); the line is sent as [:io-write s]:
+  ;; owns a buffer (an editor's *Messages*); the line is sent as [:io/write s]:
   ;;   (add-backend (file-backend "app.log"))
   ;;   (add-backend (process-backend buffer-pid))
   ;; To redirect plain `println` the same way, reference `io/…` (it loads on demand) and use

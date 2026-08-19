@@ -1,7 +1,7 @@
 ;; Tests for the pure game logic of `pong`. The GUI loop (`run`/`loop`) isn't
 ;; covered here — `nest test` only exercises pure functions; the window is
 ;; verified by a bounded `nest run --for`.
-(defmodule pong-test (:use pong) (:use test) (:use math))
+(defmodule pong-test (:use pong) (:use test) (:use math :exclude [clamp]))
 
 (describe "geometry"
   (test "paddle-h is a fraction of the court, floored"

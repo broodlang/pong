@@ -15,6 +15,6 @@ the `nest run` entry by default (module `main`, fn `main`)."
   ;; owns a buffer (an editor's *Messages*); the line is sent as [:io-write s]:
   ;;   (add-backend (file-backend "app.log"))
   ;;   (add-backend (process-backend buffer-pid))
-  ;; To redirect plain `println` the same way, `(require 'io)` and use
+  ;; To redirect plain `println` the same way, reference `io/…` (it loads on demand) and use
   ;;   (with-out (process-port buffer-pid) (println "…")).
   (println (greeting)))

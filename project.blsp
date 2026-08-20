@@ -3,7 +3,7 @@
 (project
   :name "pong"
   :version "0.1.0"
-  :brood ">= 0.4.0"
+  :brood ">= 0.5.0"
   :main pong)
 ;; To depend on other Brood packages, add a :dependencies vector to the form
 ;; above (ADR-037). Dep names are bare symbols (no quoting):

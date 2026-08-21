@@ -8,7 +8,7 @@ held-key direction — left W/S + D to load + Space to shoot, right ↑/↓ + . 
 CAPPED speed so a sharply-angled return can beat a paddle and score). Holding the
 LOAD key charges the paddle: it moves slower but returns the ball faster. The
 whole court is the
-window: all geometry is derived from `gui-size` in character CELLS and refit on
+window: all geometry is derived from `gui/size` in character CELLS and refit on
 `[:resize]`. One self-paced process (the window owner) draws a frame, parks in
 `(receive)` on an `(after)` frame timer that quit keys / the window X / paddle
 keys preempt, then steps the world and recurses — the ADR-058 self-clocked loop."
@@ -598,10 +598,10 @@ square around the origin (no trig needed); `vx` is widened ×2 because a cell is
 about half as wide as it is tall, so the spray reads round on screen."
   (if (= n 0)
     [acc s]
-    (let ([a s1] (rand-float s)
-          [b s2] (rand-float s1)
-          [c s3] (rand-float s2)
-          [d s4] (rand-float s3)
+    (let ([a s1] (rand/float s)
+          [b s2] (rand/float s1)
+          [c s3] (rand/float s2)
+          [d s4] (rand/float s3)
           life (round (+ *part-life-min* (* d (- *part-life-max* *part-life-min*))))
           p {:x cx
              :y cy
@@ -658,7 +658,7 @@ at a length that isn't a milestone (so most hits stay quiet)."
   "A fan blows up: pick a random front-row seat, take it + `*fan-victims*`-1
 neighbours out (added to `:abducted`, so they repopulate on the usual respawn
 timer), and set off a big fiery burst, shake and a BOOM! callout. Threads PRNG."
-  (let ([a s1] (rand-float (get st :s))
+  (let ([a s1] (rand/float (get st :s))
         cols (get st :cols)
         rows (get st :rows)
         ncols (max 1 (quot cols *crowd-spacing*))
@@ -860,8 +860,8 @@ direction the needle stopped on — a random side + launch angle. Threads the PR
 Used at kick-off and after a point."
   (let (cols (get st :cols)
         rows (get st :rows)
-        [a s1] (rand-float (get st :s))
-        [b s2] (rand-float s1))
+        [a s1] (rand/float (get st :s))
+        [b s2] (rand/float s1))
     (assoc st
       :bx (- (/ cols 2) (/ *ball-w* 2))
       :by (- (/ rows 2) (/ *ball-h* 2))
@@ -883,8 +883,8 @@ Used at kick-off and after a point."
   "Re-roll each paddle's aim bias (`:le`/`:re`, rows) to a fresh value in
 `[-e, e]` where `e` is `*aim-error*` paddle-heights, threading the PRNG. Called
 every `*aim-period*` frames from `move-ai`."
-  (let ([a s1] (rand-float (get st :s))
-        [b s2] (rand-float s1)
+  (let ([a s1] (rand/float (get st :s))
+        [b s2] (rand/float s1)
         e (* *aim-error* (paddle-h (get st :rows)) (get st :ai-aim-mult)))
     (assoc st
       :le (* (- (* 2 a) 1) e)
@@ -981,11 +981,11 @@ close to a full peak it aims — a high-skill AI almost always goes for ~1.0, a 
 often skips and, when it does load, aims at a mistimed 0.2–0.8."
   (let (skill (get st :ai-load-skill)
         salt (if (= side :left) 101 202)
-        ; burn the first draw: rand-float's initial value is correlated for the
+        ; burn the first draw: rand/float's initial value is correlated for the
         ; structured (seed0 + rally·k + salt) seeds, which would bias the roll
-        [_ s0] (rand-float (+ (get st :seed0) (* (get st :rally) 7919) salt))
-        [a s1] (rand-float s0)
-        [b _] (rand-float s1))
+        [_ s0] (rand/float (+ (get st :seed0) (* (get st :rally) 7919) salt))
+        [a s1] (rand/float s0)
+        [b _] (rand/float s1))
     (if (>= a (+ 0.35 (* 0.65 skill)))
       0
       (+ (* (- 1 skill) (+ 0.2 (* b 0.6))) skill))))
@@ -1185,7 +1185,7 @@ ball off the BOTTOM wall has a `*crash-chance*` to smash through into the crowd.
             (<= (+ (get st1 :by) *ball-h*) rows) (assoc st1 :in-crowd false)
             else st1))
       (> (+ by *ball-h*) rows)
-        (let ([roll s1] (rand-float (get st :s)))
+        (let ([roll s1] (rand/float (get st :s)))
           (if (and (> (abs (get st :vx)) *crash-speed*)
                 (< roll *crash-chance*))
             ; dive INTO the crowd (no reflect)
@@ -1226,7 +1226,7 @@ gets its own louder callout + shake + the charge glow."
         human? (= (get st (side-key owner :l-ctrl :r-ctrl)) :human)
         load (get st loadk)
         loaded? (>= load *load-hit-min*)
-        [troll s1] (rand-float (get st :s))
+        [troll s1] (rand/float (get st :s))
         ;; PERFECT RELEASE (+`*release-boost*`): a human who LOCKED the charge within the
         ;; `*release-window*` before contact; the AI lands it with odds `:ai-timing`
         ;; (level/10). Only counts when there's actually a charge to release.
@@ -1268,7 +1268,7 @@ gets its own louder callout + shake + the charge glow."
               n
               *hit-speed*)
         ;; past the threshold, each hit risks a fan blowing up in the stands
-        [froll s2] (rand-float (get hit :s)))
+        [froll s2] (rand/float (get hit :s)))
     (if (and (> r *fan-threshold*) (< froll *fan-chance*))
       (fan-explosion (assoc hit :s s2))
       (assoc hit :s s2))))
@@ -1370,8 +1370,8 @@ detonates the board + crowd finale."
   "Drop one random token into the central play area at a random height, threading
 the PRNG. Carries its catalog entry plus `:x`/`:y`/`:life`."
   (let ([k s1] (sample (get st :s) *powerups*)
-        [rx s2] (rand-float s1)
-        [ry s3] (rand-float s2)
+        [rx s2] (rand/float s1)
+        [ry s3] (rand/float s2)
         cols (get st :cols)
         rows (get st :rows)
         x (+ (* cols 0.32) (* rx (* cols 0.36)))
@@ -1509,9 +1509,9 @@ every target is a violent `*storm-max*` gale. Threads the PRNG."
                        [st timer]
                        ;; roll a new target: in a storm always a strong gale, else
                        ;; mostly a CALM near-zero target, occasionally a mild gust
-                       (let ([p s1] (rand-float (get st :s))
-                             [a s2] (rand-float s1)
-                             [b s3] (rand-float s2)
+                       (let ([p s1] (rand/float (get st :s))
+                             [a s2] (rand/float s1)
+                             [b s3] (rand/float s2)
                              mag (cond
                                    storm? *storm-max*
                                    (< p *wind-still-chance*) *wind-still*
@@ -1551,7 +1551,7 @@ court — the visible airflow."
 ;; ---- aliens (UFO abductions) ----
 (defn rand-range (s lo hi)
   "A uniform random value in `[lo, hi)`, threading PRNG `s`; returns `[v s']`."
-  (let ([r s1] (rand-float s))
+  (let ([r s1] (rand/float s))
     [(+ lo (* r (- hi lo))) s1]))
 
 (defn rand-int-range (s lo hi)
@@ -1561,7 +1561,7 @@ court — the visible airflow."
 
 (defn rand-pick (s v)
   "A uniformly random element of vector `v`, threading `s`; returns `[elem s']`."
-  (let ([r s1] (rand-float s))
+  (let ([r s1] (rand/float s))
     [(vector-ref v (mod (round (* r 100000)) (count v))) s1]))
 
 (defn step-lifed (st active-key timer-key min-gap max-gap spawn-fn)
@@ -1594,7 +1594,7 @@ Returns the updated `st`."
   (let (timer (- (get st timer-key) 1))
     (if (> timer 0)
       (assoc st timer-key timer)
-      (let ([roll s1] (rand-float (get st :s))
+      (let ([roll s1] (rand/float (get st :s))
             [nt s2] (next-check-timer s1)
             ticked (assoc st :s s2 timer-key nt))
         (if (< roll *event-chance*) (spawn-fn ticked) ticked)))))
@@ -1602,8 +1602,8 @@ Returns the updated `st`."
 (defn spawn-ufo (st)
   "Launch a UFO in from one side (random), targeting a random front-row seat
 column in the middle of the stand. Threads the PRNG."
-  (let ([a s1] (rand-float (get st :s))
-        [b s2] (rand-float s1)
+  (let ([a s1] (rand/float (get st :s))
+        [b s2] (rand/float s1)
         cols (get st :cols)
         from-left? (< a 0.5)
         ncols (max 1 (quot cols *crowd-spacing*))
@@ -1652,8 +1652,8 @@ gap (≈15–35 s, often enough to see). Returns `[frames next-seed]`."
 there (added to `:abducted`, so it repopulates on the usual timer), and start the
 figure at that seat — climbing up onto the court (`:vy`) toward a run height
 (`:ty`) then bolting across (toward the far side). Threads the PRNG."
-  (let ([a s1] (rand-float (get st :s))
-        [b s2] (rand-float s1)
+  (let ([a s1] (rand/float (get st :s))
+        [b s2] (rand/float s1)
         cols (get st :cols)
         rows (get st :rows)
         ncols (max 1 (quot cols *crowd-spacing*))
@@ -1708,7 +1708,7 @@ straight through, leaving a red burst + a SPLAT! callout + a shake."
 (defn streaker-contact (st)
   "Ball met streaker — a coin flip: 50% the streaker is killed (ball through),
 50% they bat it back like a paddle. Threads the PRNG."
-  (let ([r s1] (rand-float (get st :s))
+  (let ([r s1] (rand/float (get st :s))
         st1 (assoc st :s s1))
     (if (< r 0.5) (streaker-kill st1) (streaker-bounce st1))))
 
@@ -1770,10 +1770,10 @@ far side, rolling a fresh delay."
 PRNG. Tail-recursive; returns `[signs s']`."
   (if (= n 0)
     [acc s]
-    (let ([a s1] (rand-float s)
-          [b s2] (rand-float s1)
-          [c s3] (rand-float s2)
-          [d s4] (rand-float s3)
+    (let ([a s1] (rand/float s)
+          [b s2] (rand/float s1)
+          [c s3] (rand/float s2)
+          [d s4] (rand/float s3)
           text (vector-ref *signs-text* (mod (round (* a 100000)) (count *signs-text*)))
           life (+ *sign-life* (round (* (- (* 2 c) 1) *sign-life-jitter*)))
           sign {:x (+ (round (* cols 0.05)) (round (* b (* cols 0.85))))
@@ -1786,7 +1786,7 @@ PRNG. Tail-recursive; returns `[signs s']`."
 
 (defn spawn-signs (st)
   "Pop up a fresh batch of `*sign-min*`..`*sign-max*` placards across the stand."
-  (let ([r s1] (rand-float (get st :s))
+  (let ([r s1] (rand/float (get st :s))
         n (+ *sign-min* (round (* r (- *sign-max* *sign-min*))))
         [signs s2] (spawn-signs-acc s1 n (get st :cols) (get st :rows) (get st :signs)))
     (assoc st :signs signs :s s2)))
@@ -1855,7 +1855,7 @@ toward it)? While defending it won't dodge — the perfect moment to shoot it."
 recursive; returns `[bullets s']`."
   (if (= i pellets)
     [acc s]
-    (let ([a s1] (rand-float s)
+    (let ([a s1] (rand/float s)
           fan (if (> pellets 1) (* spread ph (- (* 2 (/ i (- pellets 1))) 1)) 0)
           y (clamp (+ lead fan (* (- a 0.5) jitter ph)) 0 rows)
           b {:x bx :y y :vx vx :side side})
@@ -2100,7 +2100,7 @@ the trail, particles, flash, crowd cheer, active effects, and floating tokens. P
                      (* (if (< bcy (/ (get m :rows) 2)) 1 -1) *event-magnet*)
                      0)
             [quake s2] (if (= ev :quake)
-                         (let ([qr s1] (rand-float (get m :s)))
+                         (let ([qr s1] (rand/float (get m :s)))
                            [(* (- (* 2 qr) 1) *event-quake*) s1])
                          [0 (get m :s)])
             ;; the wind + event tweaks nudge the ball's velocity, curving its flight
@@ -3179,7 +3179,7 @@ stutter. Collecting EVERY frame keeps each one tiny (a fraction of a ms — the 
 scales with garbage since the last collect, not with the live set), trading the lumpy
 6ms hitch for an even, negligible tax. Smooths the motion the auto-GC was jittering."
   (do
-    (gui-draw w (render st))
+    (gui/draw w (render st))
     (gc-collect)
     (loop-wait w st deadline)))
 
@@ -3194,7 +3194,7 @@ catch-up ticks via `advance-frame`) and draws the result via `loop`."
     ([:resize cols rows] (loop w (refit st cols rows) deadline))
     ([:key-up k] (loop-wait w (release-key st k) deadline))
     (m (cond
-         (or (= m :close) (= m :ctrl-c)) (gui-close w)
+         (or (= m :close) (= m :ctrl-c)) (gui/close w)
          (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
          else (loop-wait w (press-key st m) deadline)))
     (after (wait-ms deadline)
@@ -3285,14 +3285,14 @@ players' keys with who drives each side."
 MENU (re-reading the window size), or QUIT the game."
   (cond
     (= sel 0) (loop w st (fresh-deadline))
-    (= sel 1) (let ([c r] (gui-size w)) (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))
-    else (gui-close w)))
+    (= sel 1) (let ([c r] (gui/size w)) (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))
+    else (gui/close w)))
 
 (defn pause-handle (w st sel tick deadline m)
   "Dispatch a pause keypress `m`: the window X quits, Esc / q resume (toggle off),
 up/down move the highlight, ENTER/Space fire the action, anything else is ignored."
   (cond
-    (= m :close) (gui-close w)
+    (= m :close) (gui/close w)
     (pause-trigger? m) (loop w st (fresh-deadline))
     (menu-up? m) (pause-loop w st (mod (- sel 1) 3) tick deadline)
     (menu-down? m) (pause-loop w st (mod (+ sel 1) 3) tick deadline)
@@ -3306,7 +3306,7 @@ wait) so key releases / ignored keys re-park without re-rendering; only a tick (
 colour cycle), a resize, or a highlight move redraws. The world never steps while
 paused."
   (do
-    (gui-draw w (into (render st) (pause-ops st sel tick)))
+    (gui/draw w (into (render st) (pause-ops st sel tick)))
     (pause-wait w st sel tick deadline)))
 
 (defn pause-wait (w st sel tick deadline)
@@ -3327,10 +3327,10 @@ point on the COURT plus one in the STAND that tears a spectator out of their sea
 with a gentle shake (no full-court flash). Threads the PRNG."
   (let (cols (get st :cols)
         rows (get st :rows)
-        [a s1] (rand-float (get st :s))
-        [b s2] (rand-float s1)
-        [c s3] (rand-float s2)
-        [d s4] (rand-float s3)
+        [a s1] (rand/float (get st :s))
+        [b s2] (rand/float s1)
+        [c s3] (rand/float s2)
+        [d s4] (rand/float s3)
         hue1 (mod (+ (get st :hue) (round (* c 360))) 360)
         hue2 (mod (+ hue1 137) 360)
         ncols (max 1 (quot cols *crowd-spacing*))
@@ -3437,7 +3437,7 @@ the announce."
   "Carry out the chosen win-screen action (re-reading the window size): RETRY plays
 a fresh match with the SAME settings (the stored `:config`), MAIN MENU returns to
 setup."
-  (let ([c r] (gui-size w))
+  (let ([c r] (gui/size w))
     (if (= sel 0)
       (loop w (init c (court-rows r) (now-ns) (get st :config)) (fresh-deadline))
       (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))))
@@ -3446,7 +3446,7 @@ setup."
   "Dispatch a win-screen keypress `m`: the window X / Ctrl-C quit, up/down move the
 highlight, ENTER/Space fire the action, anything else is ignored."
   (cond
-    (or (= m :close) (= m :ctrl-c)) (gui-close w)
+    (or (= m :close) (= m :ctrl-c)) (gui/close w)
     (menu-up? m) (win-loop w st (mod (- sel 1) 2) tick deadline)
     (menu-down? m) (win-loop w st (mod (+ sel 1) 2) tick deadline)
     (menu-select? m) (win-act w st sel)
@@ -3459,7 +3459,7 @@ finale frame once, then hands off to `win-wait` so key releases / ignored keys d
 force a re-render; the explosion advances on the tick. Up/down pick, ENTER/Space fire;
 the window X / Ctrl-C quit."
   (do
-    (gui-draw w (win-render st sel))
+    (gui/draw w (win-render st sel))
     (win-wait w st sel tick deadline)))
 
 (defn win-wait (w st sel tick deadline)
@@ -3737,7 +3737,7 @@ Each action plays a short UI sound (a soft blip on move, a confirm tone per step
 and a two-note fanfare when the match opens); `beep!` is a no-op when audio
 isn't compiled in or is muted."
   (cond
-    (quit? m) (gui-close w)
+    (quit? m) (gui/close w)
     (menu-up? m) (do (beep! 520 18 0.12) (menu-loop w (menu-move menu -1) deadline))
     (menu-down? m) (do (beep! 470 18 0.12) (menu-loop w (menu-move menu 1) deadline))
     (menu-select? m)
@@ -3758,7 +3758,7 @@ lives here (not in the wait) so key releases / ignored keys re-park without
 re-rendering; only a tick (the title's colour cycle), a resize, or a highlight move
 redraws."
   (do
-    (gui-draw w (render-menu menu))
+    (gui/draw w (render-menu menu))
     (menu-wait w menu deadline)))
 
 (defn menu-wait (w menu deadline)
@@ -3779,12 +3779,12 @@ frame timeout advances the title's colour cycle."
   "Open a maximised window and run Brood Pong — first the opening MENU (mode, AI
 difficulty, game difficulty, points to win), then the match it sets up — until quit.
 The court is
-the whole window (sized from `gui-size` in cells, with a small cell font for
+the whole window (sized from `gui/size` in cells, with a small cell font for
 smooth motion); the PRNG is seeded from the wall clock so each launch differs."
-  (let (w (gui-open "Brood Pong" 1280 800)
-        _ (gui-font! w {:family :mono :height *cell-px*})
-        _ (gui-maximize! w true)
-        [cols rows] (gui-size w))
+  (let (w (gui/open "Brood Pong" 1280 800)
+        _ (gui/font! w {:family :mono :height *cell-px*})
+        _ (gui/maximize! w true)
+        [cols rows] (gui/size w))
     (menu-loop w (menu-init cols rows (now-ns)) (+ (now-ns) (* *frame-ms* 1000000)))))
 
 (defn main ()

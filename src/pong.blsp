@@ -1369,7 +1369,7 @@ detonates the board + crowd finale."
 (defn spawn-powerup (st)
   "Drop one random token into the central play area at a random height, threading
 the PRNG. Carries its catalog entry plus `:x`/`:y`/`:life`."
-  (let ([k s1] (sample (get st :s) *powerups*)
+  (let ([k s1] (seq/sample (get st :s) *powerups*)
         [rx s2] (rand/float s1)
         [ry s3] (rand/float s2)
         cols (get st :cols)
@@ -1562,7 +1562,7 @@ court — the visible airflow."
 (defn rand-pick (s v)
   "A uniformly random element of vector `v`, threading `s`; returns `[elem s']`."
   (let ([r s1] (rand/float s))
-    [(vector-ref v (mod (round (* r 100000)) (count v))) s1]))
+    [(seq/vector-ref v (mod (round (* r 100000)) (count v))) s1]))
 
 (defn step-lifed (st active-key timer-key min-gap max-gap spawn-fn)
   "The shared 'one-at-a-time timed entity' loop (crowd show / court event): if the
@@ -1774,7 +1774,7 @@ PRNG. Tail-recursive; returns `[signs s']`."
           [b s2] (rand/float s1)
           [c s3] (rand/float s2)
           [d s4] (rand/float s3)
-          text (vector-ref *signs-text* (mod (round (* a 100000)) (count *signs-text*)))
+          text (seq/vector-ref *signs-text* (mod (round (* a 100000)) (count *signs-text*)))
           life (+ *sign-life* (round (* (- (* 2 c) 1) *sign-life-jitter*)))
           sign {:x (+ (round (* cols 0.05)) (round (* b (* cols 0.85))))
                 :y (+ rows 1 (round (* d 3)))
@@ -2723,7 +2723,7 @@ callout is live."
   "Shift a `[:rect|:text row col …]` op by `(dr, dc)` cells (row at index 1, col at
 index 2) — the screen-shake transform; any other op passes through unchanged."
   (if (and (vector? op) (or (= (first op) :rect) (= (first op) :text)))
-    (assoc (assoc op 1 (+ (vector-ref op 1) dr)) 2 (+ (vector-ref op 2) dc))
+    (assoc (assoc op 1 (+ (seq/vector-ref op 1) dr)) 2 (+ (seq/vector-ref op 2) dc))
     op))
 
 (defn shake-offset (st)
@@ -3059,19 +3059,19 @@ trigger / load that key was holding."
   "Whole milliseconds from now until `deadline` (ns), floored at 0 — the
 `(after)` delay that keeps the loop on a fixed cadence regardless of how long a
 frame's work took (so motion doesn't speed up / drift when a frame is cheap)."
-  (max 0 (quot (- deadline (now-ns)) 1000000)))
+  (max 0 (quot (- deadline (os/now-ns)) 1000000)))
 
 (defn next-deadline (deadline)
   "The next frame's deadline (ns): one `*frame-ms*` on, but snapped forward to
 `now` if we've already fallen a whole frame behind, so the loop can't spiral."
   (let (frame-ns (* *frame-ms* 1000000)
         d (+ deadline frame-ns))
-    (if (< d (now-ns)) (+ (now-ns) frame-ns) d)))
+    (if (< d (os/now-ns)) (+ (os/now-ns) frame-ns) d)))
 
 (defn fresh-deadline ()
   "A frame deadline one `*frame-ms*` from now — used to resync the loop after a
 pause (so resuming doesn't fire a burst of catch-up ticks)."
-  (+ (now-ns) (* *frame-ms* 1000000)))
+  (+ (os/now-ns) (* *frame-ms* 1000000)))
 
 (defn- advance-frame-acc
   (st deadline frame-ns now n)
@@ -3094,29 +3094,29 @@ pause (so resuming doesn't fire a burst of catch-up ticks)."
 Returns `[st' next-deadline]`. This decouples game SPEED from render frame-rate — a
 slow frame runs extra ticks instead of moving the ball less — so the ball never
 appears to slow down or its speed jitter when frames run long."
-  (advance-frame-acc st deadline (* *frame-ms* 1000000) (now-ns) 0))
+  (advance-frame-acc st deadline (* *frame-ms* 1000000) (os/now-ns) 0))
 
 (defn pause-trigger? (m)
   "Does keypress `m` request a PAUSE — Esc or q? (Neither quits outright; both open
 the pause menu, so nothing ever exits a match without a prompt.)"
   (or (= m :escape) (= m "q") (= m "Q")))
 
-;; Was Brood built with audio? `audio-beep` is a native builtin gated on
-;; `--features audio`; without the feature the symbol is simply UNBOUND, so a
-;; bare call would error rather than no-op. Resolved once at load — when false,
-;; `beep!` skips every tone.
-(def *audio?* (bound? 'audio-beep))
+;; Can this Brood make a sound? `%audio-beep` is a native builtin; on a current
+;; runtime it is always bound and already no-ops without `--features audio`, with
+;; no device, or when muted. The `bound?` probe stays as insurance for a stripped
+;; build where the symbol is missing outright — there a bare call would ERROR
+;; rather than stay quiet. Resolved once at load; when false, `beep!` skips every
+;; tone (and never spawns).
+(def *audio?* (bound? '%audio-beep))
 
 (defn beep! (freq ms & vol)
-  "Play a tone through `audio-beep`, but only when audio is compiled in (see
-`*audio?*`) — so the same source runs on a Brood built without `--features
-audio`, it just stays silent. Pass an optional peak `vol` like `audio-beep`.
-Fires the tone in a DETACHED process so `audio-beep`'s device latency (notably the
-first-call warm-up) never stalls the menu / game loop — keeping input smooth.
-(With the feature, `audio-beep` is itself a no-op when muted / no device; this
-guards the harder case where the builtin doesn't exist at all.)"
+  "Play a tone through `%audio-beep`, but only when the builtin exists (see
+`*audio?*`) — so the same source runs on a Brood without audio, it just stays
+silent. Pass an optional peak `vol` like `%audio-beep`. Fires the tone in a
+DETACHED process so `%audio-beep`'s device latency (notably the first-call
+warm-up) never stalls the menu / game loop — keeping input smooth."
   (when *audio?*
-    (spawn (fn () (apply audio-beep freq ms vol)))))
+    (spawn (fn () (apply %audio-beep freq ms vol)))))
 
 (defn play-sounds! (old new)
   "Play this frame's sound effects by DIFFING the previous (`old`) and new (`new`)
@@ -3180,7 +3180,7 @@ scales with garbage since the last collect, not with the live set), trading the 
 6ms hitch for an even, negligible tax. Smooths the motion the auto-GC was jittering."
   (do
     (gui/draw w (render st))
-    (gc-collect)
+    (dev/gc-collect)
     (loop-wait w st deadline)))
 
 (defn loop-wait (w st deadline)
@@ -3230,7 +3230,7 @@ players' keys with who drives each side."
         ostart (+ py (round (* ph 0.26)))
         oslot (round (* ph 0.12))
         option-ops (mapcat (fn (i)
-                             (let (label (vector-ref (vector-ref opts i) 0)
+                             (let (label (seq/vector-ref (seq/vector-ref opts i) 0)
                                    active (= i sel)
                                    sc (oscale active)
                                    row (+ ostart (* i oslot))
@@ -3285,7 +3285,7 @@ players' keys with who drives each side."
 MENU (re-reading the window size), or QUIT the game."
   (cond
     (= sel 0) (loop w st (fresh-deadline))
-    (= sel 1) (let ([c r] (gui/size w)) (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))
+    (= sel 1) (let ([c r] (gui/size w)) (menu-loop w (menu-init c r (os/now-ns)) (fresh-deadline)))
     else (gui/close w)))
 
 (defn pause-handle (w st sel tick deadline m)
@@ -3367,7 +3367,7 @@ barred + brighter)."
         ostart (round (* rows 0.66))
         oslot (round (* rows 0.11))
         option-ops (mapcat (fn (i)
-                             (let (label (vector-ref (vector-ref opts i) 0)
+                             (let (label (seq/vector-ref (seq/vector-ref opts i) 0)
                                    active (= i sel)
                                    sc (if active
                                         (min 12 (max 2 (round (* rows 0.05))))
@@ -3439,8 +3439,8 @@ a fresh match with the SAME settings (the stored `:config`), MAIN MENU returns t
 setup."
   (let ([c r] (gui/size w))
     (if (= sel 0)
-      (loop w (init c (court-rows r) (now-ns) (get st :config)) (fresh-deadline))
-      (menu-loop w (menu-init c r (now-ns)) (fresh-deadline)))))
+      (loop w (init c (court-rows r) (os/now-ns) (get st :config)) (fresh-deadline))
+      (menu-loop w (menu-init c r (os/now-ns)) (fresh-deadline)))))
 
 (defn win-handle (w st sel tick deadline m)
   "Dispatch a win-screen keypress `m`: the window X / Ctrl-C quit, up/down move the
@@ -3567,7 +3567,7 @@ sensible default when each new list step opens."
       (= step :game) (assoc menu :game (get menu :game-level) :step :points :sel 1)
       else
         (let (opts (menu-step-options step)
-              choice (vector-ref (vector-ref opts (get menu :sel)) 1))
+              choice (seq/vector-ref (seq/vector-ref opts (get menu :sel)) 1))
           (cond
             (= step :mode)
               (assoc menu
@@ -3591,7 +3591,7 @@ and lit in a rainbow hue over a soft bar, the rest small and dim."
         slot (max 4 (round (* rows 0.12)))
         start (round (* rows 0.44)))
     (mapcat (fn (i)
-              (let (label (vector-ref (vector-ref opts i) 0)
+              (let (label (seq/vector-ref (seq/vector-ref opts i) 0)
                     active (= i sel)
                     sc (if active
                          (min 16 (max 2 (round (* rows 0.075))))
@@ -3728,7 +3728,7 @@ the game `loop` on a fresh world fitted to the court portion of the window."
                 :difficulty (get menu :difficulty)
                 :game (get menu :game)
                 :points (get menu :points)})
-    (loop w (init cols rows (now-ns) config) (+ (now-ns) (* *frame-ms* 1000000)))))
+    (loop w (init cols rows (os/now-ns) config) (+ (os/now-ns) (* *frame-ms* 1000000)))))
 
 (defn menu-handle (w menu deadline m)
   "Dispatch a menu keypress `m`: quit, move the highlight, or confirm — starting
@@ -3785,7 +3785,7 @@ smooth motion); the PRNG is seeded from the wall clock so each launch differs."
         _ (gui/font! w {:family :mono :height *cell-px*})
         _ (gui/maximize! w true)
         [cols rows] (gui/size w))
-    (menu-loop w (menu-init cols rows (now-ns)) (+ (now-ns) (* *frame-ms* 1000000)))))
+    (menu-loop w (menu-init cols rows (os/now-ns)) (+ (os/now-ns) (* *frame-ms* 1000000)))))
 
 (defn main ()
   "Entry point (`nest run`) — open Brood Pong on its setup menu."

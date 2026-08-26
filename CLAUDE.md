@@ -1,15 +1,17 @@
 # pong — guidance for Claude
 
-This is a Brood (`.blsp`) project scaffolded by `nest new`. Replace this stub
-with project-specific guidance — commands, conventions, gotchas.
+Brood Pong — a full-screen, over-the-top game of Pong. The whole game lives in
+one module, `src/pong.blsp` (physics, rendering, menus, and the self-clocked
+frame loop); `tests/pong_test.blsp` covers it. There is no other source module.
 
 ## Running
 
 - `nest test`   — run the test suite (each test runs in its own green process).
-- `nest run`    — invoke the entry point. Defaults to the `main` function in
-  the `main` module; override in `project.blsp` with `:main` (bare symbols,
-  the manifest is data — `:main app` runs `app/main`; `:main (app start)`
-  runs `app/start`; never quote them).
+- `nest run`    — invoke the entry point. This project declares `:main pong`
+  in `project.blsp`, so it runs `pong/main` (without a `:main`, `nest` would
+  default to `main/main`). Entries are bare symbols — the manifest is data:
+  `:main app` runs `app/main`, `:main (app start)` runs `app/start`; never
+  quote them.
   Each module is a namespace (ADR-065): a file's `defmodule name` makes its
   `def`/`defn` define `name/foo`; a bare reference resolves in the current
   namespace, then through `(:use …)` imports, then root/prelude. So the same
@@ -27,10 +29,13 @@ with project-specific guidance — commands, conventions, gotchas.
 it before generating Brood code. The `.claude/skills/writing-brood` skill
 carries the short version and auto-loads when Claude Code edits `.blsp` files.
 
-Brood ships randomness (`rand-int`/`rand-float`/`shuffle`/`sample` — pure and
+Brood ships randomness (`rand/int`/`rand/float`/`shuffle`/`sample` — pure and
 seedable, thread the seed), bitwise ops (`bit-and`/`bit-or`/`bit-xor`/...),
-and discovery (`apropos`, `all-globals`, `doc-search`) — use the last three to
-find what exists instead of guessing names.
+and discovery (`apropos` / `doc-search`, plus the `all-globals` MCP tool) —
+use those to find what exists instead of guessing names. Subsystem builtins
+are namespaced: `os/now-ns`, `dev/gc-collect`, `gui/…`, `term/…`, `text/…`,
+`rand/…`. A bare, unnamespaced name that `nest test` reports as an "unbound
+symbol" warning is almost always one of these that needs its prefix.
 
 ## MCP integration
 

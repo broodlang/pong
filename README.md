@@ -84,7 +84,6 @@ patterns that differ from other Lisps — see
 ```
 project.blsp          project manifest (name, version, :main entry)
 src/pong.blsp         the game — physics, rendering, menus, the self-clocked loop
-src/main.blsp         the scaffold's logger/greeting entry (unused by the game)
 tests/                the test suite
 docs/                 Brood language reference
 ```

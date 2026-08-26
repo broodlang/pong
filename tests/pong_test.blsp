@@ -350,7 +350,7 @@
       (is (> (exc *ball-vx* 2.0) (exc *ball-vx* 0.6)))))
   (test "a hyped crowd stands higher than a calm one, and stays in its band"
     (let (rows 52
-          top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
+          top-row (fn (ops) (reduce (fn (m o) (min m (seq/vector-ref o 1))) 9999 ops))
           calm (crowd-ops (assoc (init 200 60 7) :base-vx *ball-vx* :ball-mult 1.0 :cheer 0)
                  200 rows)
           hyped (crowd-ops (assoc (init 200 60 7) :base-vx *charge-max* :ball-mult 2.0 :cheer 0)
@@ -359,10 +359,10 @@
       (is (> (count calm) 20))
       ; hyped reaches higher (smaller row)
       (is (<= (top-row hyped) (top-row calm)))
-      (is (every? (fn (o) (>= (vector-ref o 1) rows)) calm))))
+      (is (every? (fn (o) (>= (seq/vector-ref o 1) rows)) calm))))
   (test "the Mexican wave only runs once the shot count hits the threshold"
     (let (rows 52
-          top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
+          top-row (fn (ops) (reduce (fn (m o) (min m (seq/vector-ref o 1))) 9999 ops))
           ;; same excitement both sides (cheer 0), differing only in rally vs threshold
           below (crowd-ops (assoc (init 200 60 7) :rally (- *wave-threshold* 1) :cheer 0) 200 rows)
           at (crowd-ops (assoc (init 200 60 7) :rally *wave-threshold* :cheer 0) 200 rows))
@@ -375,7 +375,7 @@
     (is (= (wave-count *wave-triple*) 3)))
   (test "the crowd is near-still at a low shot count, livelier as it climbs"
     (let (rows 70
-          top-row (fn (ops) (reduce (fn (m o) (min m (vector-ref o 1))) 9999 ops))
+          top-row (fn (ops) (reduce (fn (m o) (min m (seq/vector-ref o 1))) 9999 ops))
           quiet (crowd-ops (assoc (init 400 90 7) :rally 0 :cheer 0 :t 0) 400 rows)
           busy (crowd-ops (assoc (init 400 90 7) :rally 9 :cheer 0 :t 0) 400 rows))
       (is (>= (top-row quiet) (top-row busy))))))
@@ -455,7 +455,7 @@
     (let (full (fx-badge-ops 0 0 {:kind :grow :glyph "+" :good? true :life *fx-life*})
           low (fx-badge-ops 0 0 {:kind :grow :glyph "+" :good? true :life (quot *fx-life* 4)})
           ;; the LAST op of a badge is the coloured duration bar — its width is element 3
-          bar-w (fn (ops) (vector-ref (last ops) 3)))
+          bar-w (fn (ops) (seq/vector-ref (last ops) 3)))
       (is (> (bar-w full) (bar-w low)))))
   (test "indicators show one badge-group per active effect, in the top corners"
     (let (st (assoc (init 400 60 7)
@@ -463,7 +463,7 @@
                :r-fx [{:kind :slow :glyph "~" :good? false :life 100}])
           ops (effect-indicator-ops st 400))
       (is (> (count ops) 0))
-      (is (every? (fn (o) (>= (vector-ref o 1) 0)) ops)))))
+      (is (every? (fn (o) (>= (seq/vector-ref o 1) 0)) ops)))))
 (describe "wind"
   ; sign preserved; capped at *charge-max* (sub-stepping, not this cap, prevents tunnelling)
   (test "clamp-vx keeps the ball crossing, capped at the speed ceiling"

@@ -57,7 +57,7 @@
       (is (= (get st :countdown) *countdown-frames*))))
   (test "when the spin stops the ball fires off at full horizontal speed"
     ;; run the whole countdown; the release sets |vx| = *ball-vx* toward a random side
-    (let (released (reduce (fn (s _) (step s)) (serve (init 200 60 7)) (range *countdown-frames*)))
+    (let (released (reduce (range *countdown-frames*) (serve (init 200 60 7)) (fn (s _) (step s))))
       (is (= (get released :countdown) 0))
       (is (= (abs (get released :vx)) *ball-vx*))))
   (test "advances the PRNG seed"
@@ -84,7 +84,7 @@
 
 (describe "step keeps the world well-formed"
   (test "ball and paddles stay in bounds over a long game"
-    (let (final (reduce (fn (s _) (step s)) (init 240 67 987654321) (range 5000)))
+    (let (final (reduce (range 5000) (init 240 67 987654321) (fn (s _) (step s))))
       (is (>= (get final :by) -1))
       (is (<= (+ (get final :by) *ball-h*) 68))
       (is (>= (get final :lp) 0))
@@ -92,10 +92,10 @@
       (is (>= (get final :rp) 0))
       (is (<= (get final :rp) 67))))
   (test "points actually accrue (the AI is beatable)"
-    (let (final (reduce (fn (s _) (step s)) (init 240 67 987654321) (range 5000)))
+    (let (final (reduce (range 5000) (init 240 67 987654321) (fn (s _) (step s))))
       (is (> (+ (get final :ls) (get final :rs)) 0))))
   (test "explosions and a trail build up during play"
-    (let (final (reduce (fn (s _) (step s)) (init 240 67 987654321) (range 5000)))
+    (let (final (reduce (range 5000) (init 240 67 987654321) (fn (s _) (step s))))
       (is (<= (count (get final :particles)) *part-max*))
       (is (= (count (get final :trail)) *trail-len*)))))
 
@@ -108,14 +108,14 @@
     (is (= (hsv->rgb 200 0 1) [255 255 255])))
   (test "channels stay in byte range for arbitrary hues"
     (let (c (hsv->rgb 999 0.7 0.4))
-      (is (every? (fn (ch) (and (>= ch 0) (<= ch 255))) c)))))
+      (is (every? c (fn (ch) (and (>= ch 0) (<= ch 255))))))))
 
 (describe "particles"
   (test "spawn-burst adds the requested count and advances the PRNG"
     (let (st (spawn-burst {:s 7 :particles nil} 10 10 12 1.0 200))
       (is (= (count (get st :particles)) 12))
       (is (not (= (get st :s) 7)))
-      (is (every? (fn (p) (> (get p :life) 0)) (get st :particles)))))
+      (is (every? (get st :particles) (fn (p) (> (get p :life) 0))))))
   (test "step-particles ages, moves, and reaps the dead"
     (let (live {:x 5 :y 5 :vx 1 :vy 0 :life 3 :max 3 :hue 0}
           dead {:x 0 :y 0 :vx 0 :vy 0 :life 1 :max 5 :hue 0}
@@ -257,12 +257,12 @@
     ;; skill 1 always targets a full 1.0
     (is (= (ai-load-plan (assoc (init 200 60 7) :ai-load-skill 1.0 :rally 3) :left) 1.0))
     ;; skill 0 across rallies: each plan is either 0 (skipped) or a mistimed 0.2–0.8
-    (let (plans (map (fn (r)
-                       (ai-load-plan (assoc (init 200 60 7) :ai-load-skill 0.0 :rally r) :left))
-                  (range 40))
-          loads (filter (fn (p) (> p 0)) plans))
-      (is (> (count (filter (fn (p) (= p 0)) plans)) 0))
-      (is (every? (fn (p) (and (>= p 0.2) (<= p 0.8))) loads))))
+    (let (plans (map (range 40)
+                  (fn (r)
+                    (ai-load-plan (assoc (init 200 60 7) :ai-load-skill 0.0 :rally r) :left)))
+          loads (filter plans (fn (p) (> p 0))))
+      (is (> (count (filter plans (fn (p) (= p 0)))) 0))
+      (is (every? loads (fn (p) (and (>= p 0.2) (<= p 0.8)))))))
   (test "a loaded paddle moves slower than an idle one"
     (let (st (init 200 60 7))
       (is (< (side-speed (assoc st :l-load 1.0) :left *human-speed*)
@@ -270,7 +270,7 @@
   (test "a held load key charges a human paddle over frames; a hit discharges it"
     (let (pve (init 200 60 7 {:mode :pve :difficulty 5 :game 5 :points 11})
           held (assoc pve :l-loading true)
-          charged (reduce (fn (s _) (move-ai s)) held (range 20)))
+          charged (reduce (range 20) held (fn (s _) (move-ai s))))
       (is (> (get charged :l-load) 0))
       ; a paddle hit spends the load back to 0
       (is (= 0
@@ -324,7 +324,7 @@
 
 (describe "crowd signs"
   (test "a batch of 2–8 signs pops up, each held about 10 s"
-    (let (st (reduce (fn (s _) (step s)) (init 600 180 7) (range 120))
+    (let (st (reduce (range 120) (init 600 180 7) (fn (s _) (step s)))
           n (count (get st :signs)))
       (is (>= n *sign-min*))
       (is (<= n *sign-max*))
@@ -350,7 +350,7 @@
       (is (> (exc *ball-vx* 2.0) (exc *ball-vx* 0.6)))))
   (test "a hyped crowd stands higher than a calm one, and stays in its band"
     (let (rows 52
-          top-row (fn (ops) (reduce (fn (m o) (min m (seq/vector-ref o 1))) 9999 ops))
+          top-row (fn (ops) (reduce ops 9999 (fn (m o) (min m (seq/vector-ref o 1)))))
           calm (crowd-ops (assoc (init 200 60 7) :base-vx *ball-vx* :ball-mult 1.0 :cheer 0)
                  200 rows)
           hyped (crowd-ops (assoc (init 200 60 7) :base-vx *charge-max* :ball-mult 2.0 :cheer 0)
@@ -359,10 +359,10 @@
       (is (> (count calm) 20))
       ; hyped reaches higher (smaller row)
       (is (<= (top-row hyped) (top-row calm)))
-      (is (every? (fn (o) (>= (seq/vector-ref o 1) rows)) calm))))
+      (is (every? calm (fn (o) (>= (seq/vector-ref o 1) rows))))))
   (test "the Mexican wave only runs once the shot count hits the threshold"
     (let (rows 52
-          top-row (fn (ops) (reduce (fn (m o) (min m (seq/vector-ref o 1))) 9999 ops))
+          top-row (fn (ops) (reduce ops 9999 (fn (m o) (min m (seq/vector-ref o 1)))))
           ;; same excitement both sides (cheer 0), differing only in rally vs threshold
           below (crowd-ops (assoc (init 200 60 7) :rally (- *wave-threshold* 1) :cheer 0) 200 rows)
           at (crowd-ops (assoc (init 200 60 7) :rally *wave-threshold* :cheer 0) 200 rows))
@@ -375,18 +375,18 @@
     (is (= (wave-count *wave-triple*) 3)))
   (test "the crowd is near-still at a low shot count, livelier as it climbs"
     (let (rows 70
-          top-row (fn (ops) (reduce (fn (m o) (min m (seq/vector-ref o 1))) 9999 ops))
+          top-row (fn (ops) (reduce ops 9999 (fn (m o) (min m (seq/vector-ref o 1)))))
           quiet (crowd-ops (assoc (init 400 90 7) :rally 0 :cheer 0 :t 0) 400 rows)
           busy (crowd-ops (assoc (init 400 90 7) :rally 9 :cheer 0 :t 0) 400 rows))
       (is (>= (top-row quiet) (top-row busy))))))
 (describe "aliens"
   (test "the rare-event roll eventually summons a UFO"
-    (let (out (reduce (fn (s _)
-                        (if (nil? (get s :ufo))
-                          (step-event (assoc s :ufo-timer 1) :ufo-timer spawn-ufo)
-                          s))
+    (let (out (reduce (range 50)
                 (init 400 180 7)
-                (range 50)))
+                (fn (s _)
+                  (if (nil? (get s :ufo))
+                    (step-event (assoc s :ufo-timer 1) :ufo-timer spawn-ufo)
+                    s))))
       (is (not (nil? (get out :ufo))))))
   (test "the event check resets to a ~1-minute (jittered) timer"
     (let ([frames _] (next-check-timer 12345))
@@ -463,7 +463,7 @@
                :r-fx [{:kind :slow :glyph "~" :good? false :life 100}])
           ops (effect-indicator-ops st 400))
       (is (> (count ops) 0))
-      (is (every? (fn (o) (>= (seq/vector-ref o 1) 0)) ops)))))
+      (is (every? ops (fn (o) (>= (seq/vector-ref o 1) 0)))))))
 (describe "wind"
   ; sign preserved; capped at *charge-max* (sub-stepping, not this cap, prevents tunnelling)
   (test "clamp-vx keeps the ball crossing, capped at the speed ceiling"
@@ -480,7 +480,7 @@
   (test "streaks drift and wrap inside the court"
     (let (st (assoc (init 200 100 7) :wind-x 1.0 :wind-y 0)
           out (step-streaks st))
-      (is (every? (fn (p) (and (>= (get p :x) 0) (< (get p :x) 200))) (get out :streaks)))))
+      (is (every? (get out :streaks) (fn (p) (and (>= (get p :x) 0) (< (get p :x) 200)))))))
   (test "the STORM power-up whips up a gale for a while"
     (let (out (apply-powerup (assoc (init 400 120 7) :owner :left)
                 {:kind :wind :good? false :name "STORM" :glyph "@" :x 50 :y 50}))
@@ -522,9 +522,9 @@
   (test "a ball in the crowd is carved through and returned, not stuck"
     (let (dove (crowd-crash (assoc (init 400 120 7) :bx 200 :by 119 :vx 3.8 :vy 2.0))
           ;; let it travel down, hit the stand floor, and climb back into play
-          out (reduce (fn (s _) (bounce-walls (assoc s :by (+ (get s :by) (get s :vy)))))
+          out (reduce (range 80)
                 dove
-                (range 80)))
+                (fn (s _) (bounce-walls (assoc s :by (+ (get s :by) (get s :vy)))))))
       (is (not (get out :in-crowd))))))
 (describe "guns & shooting"
   (test "the default gun is the pistol"
@@ -588,7 +588,7 @@
           ; a score never heals it
           scored (point (assoc broke :ls 0 :rs 0) :left)
           ; but the timer running out does
-          healed (reduce (fn (s _) (step-broke s)) broke (range *paddle-broke-frames*)))
+          healed (reduce (range *paddle-broke-frames*) broke (fn (s _) (step-broke s))))
       (is (paddle-broken? scored :right))
       (is (= (get healed :r-dmg) 0))
       (is (not (paddle-broken? healed :right)))))
@@ -650,8 +650,7 @@
     (let (out (step-show (assoc (init 400 120 7) :show {:kind :lights :life 1})))
       (is (nil? (get out :show)))))
   (test "every show kind renders some ops"
-    (is (every? (fn (k)
-                  (> (count (crowd-show-ops (assoc (init 400 120 7) :show {:kind k :life 99})
-                              400 100))
-                    0))
-          *shows*))))
+    (is (every? *shows*
+          (fn (k)
+            (> (count (crowd-show-ops (assoc (init 400 120 7) :show {:kind k :life 99}) 400 100))
+              0))))))

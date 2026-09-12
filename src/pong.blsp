@@ -662,7 +662,7 @@ timer), and set off a big fiery burst, shake and a BOOM! callout. Threads PRNG."
         rows (get st :rows)
         ncols (max 1 (quot cols *crowd-spacing*))
         idx (round (* a (- ncols 1)))
-        victims (filter (map (range *fan-victims*) (fn (k) (+ idx (- k 1))))
+        victims (seq/filter (map (range *fan-victims*) (fn (k) (+ idx (- k 1))))
                   (fn (j) (and (>= j 0) (< j ncols))))
         gaps (map victims (fn (j) {:col (* j *crowd-spacing*) :life *abduct-respawn*}))
         cx (* idx *crowd-spacing*)
@@ -677,14 +677,14 @@ timer), and set off a big fiery burst, shake and a BOOM! callout. Threads PRNG."
 (defn step-particles (ps)
   "Advance every particle one frame — drift, gravity, drag, age — and drop the
 dead, capped at `*part-max*`. Pure."
-  (take (filter (map ps
-                  (fn (p)
-                    (assoc p
-                      :x (+ (get p :x) (get p :vx))
-                      :y (+ (get p :y) (get p :vy))
-                      :vx (* (get p :vx) *part-drag*)
-                      :vy (+ (* (get p :vy) *part-drag*) *part-gravity*)
-                      :life (- (get p :life) 1))))
+  (take (seq/filter (map ps
+                      (fn (p)
+                        (assoc p
+                          :x (+ (get p :x) (get p :vx))
+                          :y (+ (get p :y) (get p :vy))
+                          :vx (* (get p :vx) *part-drag*)
+                          :vy (+ (* (get p :vy) *part-drag*) *part-gravity*)
+                          :life (- (get p :life) 1))))
           (fn (p) (> (get p :life) 0)))
     *part-max*))
 
@@ -1142,7 +1142,7 @@ through the crowd and bounces it back off the stand floor into play."
         rows (get st :rows)
         ncols (max 1 (quot cols *crowd-spacing*))
         idx (round (/ (get st :bx) *crowd-spacing*))
-        victims (filter (map (range *crash-victims*) (fn (k) (+ idx (- k 1))))
+        victims (seq/filter (map (range *crash-victims*) (fn (k) (+ idx (- k 1))))
                   (fn (j) (and (>= j 0) (< j ncols))))
         gaps (map victims (fn (j) {:col (* j *crowd-spacing*) :life *abduct-respawn*}))
         cy (+ rows (quot *crowd-rows* 2))
@@ -1458,8 +1458,8 @@ the rest on court. A no-op until a paddle has owned the ball."
         toks (get st :tokens))
     (if (nil? owner)
       st
-      (let (hits (filter toks (fn (t) (token-hit? st t)))
-            rest (filter toks (fn (t) (not (token-hit? st t)))))
+      (let (hits (seq/filter toks (fn (t) (token-hit? st t)))
+            rest (seq/filter toks (fn (t) (not (token-hit? st t)))))
         (reduce hits (assoc st :tokens rest) apply-powerup)))))
 
 (defn step-tokens (st)
@@ -1472,7 +1472,7 @@ item-free game), 1 is the base flow, 2 packs the court (insane mode)."
         period (max *powerup-min-every*
                  (round (/ (- *powerup-every* (* rally *powerup-rally-step*)) (max 0.25 pmult))))
         cap (round (* (min *powerup-max-cap* (+ *powerup-max* (quot rally 3))) pmult))
-        toks (filter (map (get st :tokens) (fn (t) (assoc t :life (- (get t :life) 1))))
+        toks (seq/filter (map (get st :tokens) (fn (t) (assoc t :life (- (get t :life) 1))))
                (fn (t) (> (get t :life) 0)))
         timer (- (get st :pu-timer) 1)
         st1 (assoc st :tokens toks :pu-timer timer))
@@ -1483,7 +1483,7 @@ item-free game), 1 is the base flow, 2 packs the court (insane mode)."
 (defn age-effects (st)
   "Tick down both sides' active effects, dropping any that have expired."
   (let (age (fn (fx)
-              (filter (map fx (fn (e) (assoc e :life (- (get e :life) 1))))
+              (seq/filter (map fx (fn (e) (assoc e :life (- (get e :life) 1))))
                 (fn (e) (> (get e :life) 0)))))
     (assoc st :l-fx (age (get st :l-fx)) :r-fx (age (get st :r-fx)))))
 
@@ -1616,7 +1616,7 @@ column in the middle of the stand. Threads the PRNG."
   "Advance the alien subsystem: respawn any abductees whose timer ran out, then
 either count down to the next UFO (none active) or fly the current one across —
 ABDUCTING its target seat as it passes over, and despawning off the far side."
-  (let (abd (filter (map (get st :abducted) (fn (a) (assoc a :life (- (get a :life) 1))))
+  (let (abd (seq/filter (map (get st :abducted) (fn (a) (assoc a :life (- (get a :life) 1))))
               (fn (a) (> (get a :life) 0)))
         st1 (assoc st :abducted abd)
         ufo (get st :ufo))
@@ -1789,7 +1789,7 @@ PRNG. Tail-recursive; returns `[signs s']`."
   "Age the held-up placards (dropping any whose ~10 s elapsed). While a batch is
 up, hold the gap timer; once they've all dropped, count the short gap down and
 pop a fresh batch."
-  (let (alive (filter (map (get st :signs) (fn (sg) (assoc sg :life (- (get sg :life) 1))))
+  (let (alive (seq/filter (map (get st :signs) (fn (sg) (assoc sg :life (- (get sg :life) 1))))
                 (fn (sg) (> (get sg :life) 0))))
     (if (> (count alive) 0)
       (assoc st :signs alive :sign-timer *sign-gap*)
@@ -1939,10 +1939,10 @@ fires a CRACK!/SHATTER! callout."
         ;; a bullet can also gun down a streaker crossing the court
         hit-sk? (fn (b)
                   (and sk (paddle-shot-box? b (get sk :x) *streaker-w* (get sk :y) *streaker-h*)))
-        ndl (count (filter moved hit-l?))
-        ndr (count (filter moved hit-r?))
-        sk-shot (and sk (> (count (filter moved hit-sk?)) 0))
-        survivors (filter moved
+        ndl (count (seq/filter moved hit-l?))
+        ndr (count (seq/filter moved hit-r?))
+        sk-shot (and sk (> (count (seq/filter moved hit-sk?)) 0))
+        survivors (seq/filter moved
                     (fn (b)
                       (and (>= (get b :x) (- 0 *bullet-w*))
                         (<= (get b :x) cols)
@@ -2604,7 +2604,7 @@ effect's `:life` runs down — so you can see what's active and for how much lon
         track [:rect (+ row *fx-badge-h*) x *fx-badge-w* 1 {:bg [42 46 58]}]
         barw (round (* *fx-badge-w* frac))
         bar (if (> barw 0) [:rect (+ row *fx-badge-h*) x barw 1 {:bg (hsv->rgb hue 0.6 1.0)}] nil))
-    (filter [body glyph track bar] (fn (o) (not (nil? o))))))
+    (seq/filter [body glyph track bar] (fn (o) (not (nil? o))))))
 
 (defn side-fx-ops (effs x0)
   "Stack a side's active-effect badges down from the top edge at column `x0`."
@@ -3416,7 +3416,7 @@ the announce."
       :cheer *cheer-frames*
       :announce-life (max 0 (- (get st1 :announce-life) 1))
       :abducted
-        (filter (map (get st1 :abducted) (fn (a) (assoc a :life (- (get a :life) 1))))
+        (seq/filter (map (get st1 :abducted) (fn (a) (assoc a :life (- (get a :life) 1))))
           (fn (a) (> (get a :life) 0))))))
 
 (defn win-act (w st sel)

@@ -260,8 +260,8 @@
     (let (plans (map (range 40)
                   (fn (r)
                     (ai-load-plan (assoc (init 200 60 7) :ai-load-skill 0.0 :rally r) :left)))
-          loads (filter plans (fn (p) (> p 0))))
-      (is (> (count (filter plans (fn (p) (= p 0)))) 0))
+          loads (seq/filter plans (fn (p) (> p 0))))
+      (is (> (count (seq/filter plans (fn (p) (= p 0)))) 0))
       (is (every? loads (fn (p) (and (>= p 0.2) (<= p 0.8)))))))
   (test "a loaded paddle moves slower than an idle one"
     (let (st (init 200 60 7))

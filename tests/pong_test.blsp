@@ -411,7 +411,7 @@
   (test "a streaker bursts out of the crowd (gap) when its timer elapses"
     (let (out (step-streaker (assoc (init 400 180 7) :streaker nil :streaker-timer 1 :abducted nil))
           sk (get out :streaker))
-      (is (not (nil? sk)))
+      (check-allow :type-mismatch (is (not (nil? sk))))
       ; a gap opened in the crowd
       (is (= (count (get out :abducted)) 1))
       ; streaker starts at that seat
@@ -620,7 +620,7 @@
 (describe "court events"
   (test "every event has a headline, and spawn arms one + announces it"
     (let (out (spawn-court-event (init 400 120 7)))
-      (is (not (nil? (get out :event))))
+      (check-allow :type-mismatch (is (not (nil? (get out :event)))))
       (is (= (get out :announce) (event-name (event-kind out))))))
   (test "an event ages and clears when its life runs out"
     (let (out (step-court-event (assoc (init 400 120 7) :event {:kind :quake :life 1})))

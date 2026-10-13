@@ -1557,7 +1557,7 @@ court — the visible airflow."
 (defn rand-pick (s v)
   "A uniformly random element of vector `v`, threading `s`; returns `[elem s']`."
   (let ([r s1] (rand/float s))
-    [(seq/vector-ref v (mod (round (* r 100000)) (count v))) s1]))
+    [(nth v (mod (round (* r 100000)) (count v))) s1]))
 
 (defn step-lifed (st active-key timer-key min-gap max-gap spawn-fn)
   "The shared 'one-at-a-time timed entity' loop (crowd show / court event): if the
@@ -1768,7 +1768,7 @@ PRNG. Tail-recursive; returns `[signs s']`."
           [b s2] (rand/float s1)
           [c s3] (rand/float s2)
           [d s4] (rand/float s3)
-          text (seq/vector-ref *signs-text* (mod (round (* a 100000)) (count *signs-text*)))
+          text (nth *signs-text* (mod (round (* a 100000)) (count *signs-text*)))
           life (+ *sign-life* (round (* (- (* 2 c) 1) *sign-life-jitter*)))
           sign {:x (+ (round (* cols 0.05)) (round (* b (* cols 0.85))))
                 :y (+ rows 1 (round (* d 3)))
@@ -2714,7 +2714,7 @@ callout is live."
   "Shift a `[:rect|:text row col …]` op by `(dr, dc)` cells (row at index 1, col at
 index 2) — the screen-shake transform; any other op passes through unchanged."
   (if (and (vector? op) (or (= (first op) :rect) (= (first op) :text)))
-    (assoc (assoc op 1 (+ (seq/vector-ref op 1) dr)) 2 (+ (seq/vector-ref op 2) dc))
+    (assoc (assoc op 1 (+ (nth op 1) dr)) 2 (+ (nth op 2) dc))
     op))
 
 (defn shake-offset (st)
@@ -3220,7 +3220,7 @@ players' keys with who drives each side."
         oslot (round (* ph 0.12))
         option-ops (mapcat (range (count opts))
                      (fn (i)
-                       (let (label (seq/vector-ref (seq/vector-ref opts i) 0)
+                       (let (label (nth (nth opts i) 0)
                              active (= i sel)
                              sc (oscale active)
                              row (+ ostart (* i oslot))
@@ -3357,7 +3357,7 @@ barred + brighter)."
         oslot (round (* rows 0.11))
         option-ops (mapcat (range (count opts))
                      (fn (i)
-                       (let (label (seq/vector-ref (seq/vector-ref opts i) 0)
+                       (let (label (nth (nth opts i) 0)
                              active (= i sel)
                              sc (if active
                                   (min 12 (max 2 (round (* rows 0.05))))
@@ -3553,7 +3553,7 @@ sensible default when each new list step opens."
       (= step :game) (assoc menu :game (get menu :game-level) :step :points :sel 1)
       else
         (let (opts (menu-step-options step)
-              choice (seq/vector-ref (seq/vector-ref opts (get menu :sel)) 1))
+              choice (nth (nth opts (get menu :sel)) 1))
           (cond
             (= step :mode)
               (assoc menu
@@ -3578,7 +3578,7 @@ and lit in a rainbow hue over a soft bar, the rest small and dim."
         start (round (* rows 0.44)))
     (mapcat (range (count opts))
       (fn (i)
-        (let (label (seq/vector-ref (seq/vector-ref opts i) 0)
+        (let (label (nth (nth opts i) 0)
               active (= i sel)
               sc (if active
                    (min 16 (max 2 (round (* rows 0.075))))

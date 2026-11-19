@@ -14,6 +14,11 @@ window: all geometry is derived from `gui/size` in character CELLS and refit on
 keys preempt, then steps the world and recurses — the ADR-058 self-clocked loop."
   (:use math))
 
+;; The state's counters, declared once: the self-clocked loop hands the state round
+;; untyped, so this is the one place that says they are whole numbers.
+(deftype game-state
+  (record &open :hue int :t int :rally int :seed0 int :signs (seqable (record &open :x int))))
+
 ;; ---- geometry & tuning (all lengths in screen CELLS; speeds in cells/frame) ----
 ;; A mono cell is taller than wide (≈1:2 w:h), so horizontal lengths/speeds are
 ;; ~doubled against vertical ones to read as square / isotropic on screen.
@@ -611,14 +616,14 @@ about half as wide as it is tall, so the spray reads round on screen."
              :hue (mod (+ hue (round (* 120 (- c 0.5)))) 360)})
       (spawn-burst-acc s4 cx cy hue speed (- n 1) (cons p acc)))))
 
-(defn spawn-burst (st cx cy n speed hue)
+(defn spawn-burst (st cx cy n speed hue:int)
   "Add an `n`-particle explosion at court cell `(cx, cy)`, coloured around `hue`,
 to `st` — threading its PRNG. The new particles are newest-first, so the
 `*part-max*` cap in `step` drops the oldest."
   (let ([ps s1] (spawn-burst-acc (get st :s) cx cy hue speed n (get st :particles)))
     (assoc st :particles ps :s s1)))
 
-(defn contact (st x y hue-kick shake freeze n speed)
+(defn contact (st:game-state x y hue-kick:int shake freeze n speed)
   "The shared 'things touched' reaction at court cell `(x, y)`: KICK the master
 hue by `hue-kick` degrees (so the whole palette snaps to new colours), SHAKE the
 court by `shake` cells, FREEZE the world for `freeze` frames (hit-stop), POP the
@@ -970,7 +975,7 @@ court, and hitting a wall kills the drift."
         top (clamp raw 0 (- rows ph)))
     [top (if (= top raw) vel1 0) hold1]))
 
-(defn ai-load-plan (st side)
+(defn ai-load-plan (st:game-state side)
   "The AI's load PLAN for `side`'s current approach: a target charge to reach at
 contact, or 0 for 'don't load this rally'. Seeded by the rally count + a stable
 `:seed0` so it holds for the whole approach and re-rolls each rally. Skill
@@ -1211,7 +1216,7 @@ fast/loaded ball can't tunnel a paddle)."
     (* (+ base (* (- (max cur base) base) *momentum-keep*))
       (+ 1 (* load (- *load-boost* 1))))))
 
-(defn paddle-hit (st new-bx paddle-top ph x by)
+(defn paddle-hit (st:game-state new-bx paddle-top ph x by)
   "Resolve a paddle hit at face `x`: read the hitting paddle's (`:owner`) LOAD, set
 the return pace (each hit adds `*hit-speedup*`; the load multiplies it up), DISCHARGE
 that paddle's load to 0, deflect, bump the RALLY counter, fire callouts, and
@@ -1308,7 +1313,7 @@ and `score` turns it into a point."
       hit-right? (paddle-hit (assoc st :owner :right) (- rx *ball-w*) (get st :rp) rph rx by)
       else st)))
 
-(defn point (st scorer)
+(defn point (st:game-state scorer)
   "Award a point to `scorer` (`:left`/`:right`). Resets the rally,
 kicks the hue to a fresh palette, flashes the court, throws a big shake + explosion
 and announces the moment. Paddle damage is NOT repaired by a score (it heals on its
@@ -2073,7 +2078,7 @@ exceeding a paddle's width and tunnelling straight through it."
                 :by (+ (get st :by) (* (get st :vy) perstep))))
     (score (collect-powerups (bounce-paddles (bounce-walls moved))))))
 
-(defn step (st)
+(defn step (st:game-state)
   "One tick of the world: advance the master hue, move the paddles, advance the
 ball (in `:ball-mult`-scaled sub-steps so a fast ball can't tunnel), bounce it off
 the walls/paddles, COLLECT any powerup the ball touched, resolve a point, then age
@@ -2124,7 +2129,7 @@ the trail, particles, flash, crowd cheer, active effects, and floating tokens. P
         (age-frame r hue))))
 
 ;; ---- the initial world ----
-(defn init (cols rows s & opts)
+(defn init (cols rows s:int & opts)
   "A fresh game on a `cols`×`rows` court, served to a pseudo-random side from seed
 `s`. An optional `config` (the menu's `{:mode :difficulty :points}`) bakes in the
 per-side controllers, AI difficulty multipliers and points-to-win; omitted (the
@@ -2275,7 +2280,7 @@ a bright wash in the scorer's hue that fades out over `*flash-frames*`."
       (let (ff (/ flash *flash-frames*))
         [:rect 0 0 cols rows {:bg (hsv->rgb (get st :flash-hue) 0.65 (* 0.55 ff))}]))))
 
-(defn net-ops (cols rows hue)
+(defn net-ops (cols rows:int hue:int)
   "The dashed centre net: a `*net-dash*`-tall, `*net-w*`-wide block every
 `*net-period*` rows — each dash a step further round the colour wheel, so the
 net is a vertical rainbow that scrolls as the master hue turns."
@@ -2283,7 +2288,7 @@ net is a vertical rainbow that scrolls as the master hue turns."
     (map (range 0 rows *net-period*)
       (fn (r) [:rect r col *net-w* *net-dash* {:bg (hsv->rgb (+ hue (* r 2)) 0.8 0.7)}]))))
 
-(defn goal-ops (cols rows)
+(defn goal-ops (cols:int rows)
   "The two GOALS — the mouths behind each paddle (`*paddle-margin*` deep): a faint
 net mesh filling each mouth, with bright posts framing it top and bottom."
   (let (mesh {:bg [54 64 86]}
@@ -2423,7 +2428,7 @@ overhead. `bright` scales the colours with the crowd's excitement."
       [torso head [:rect (- feet 4) cx w 1 {:bg (hsv->rgb hue 0.95 (min 1.0 (+ 0.3 bright)))}]]
       [torso head])))
 
-(defn crowd-ops (st cols rows)
+(defn crowd-ops (st:game-state cols:int rows)
   "The grandstand in the bottom band (`rows`..`rows+*crowd-rows*`): tiers of little
 spectators, each lifted by the travelling Mexican-wave crest plus a steady rise
 that grows with the crowd's excitement, erupting (leaping, arms up, rainbow) on a
@@ -2509,7 +2514,7 @@ while its beam reaches its target — a faint green tractor beam down into the s
                    nil))
         (append [dome body light-l light-r] beam)))))
 
-(defn crowd-show-ops (st cols rows)
+(defn crowd-show-ops (st:game-state cols:int rows)
   "The active cosmetic crowd show (if any), drawn over/around the stand: phone
 LIGHTS twinkling, a sweeping SPOTLIGHT, a flock of BIRDS, falling CONFETTI, or a
 bouncing BEACHBALL. Purely visual."
@@ -2654,7 +2659,7 @@ a little at 2, and a hot dim-RED once DESTROYED (`*paddle-hits-max*`)."
           d (if (>= dmg 2) 0.72 0.9))
       {:bg [(round (* r d)) (round (* g d)) (round (* b d))]})))
 
-(defn crack-ops (top px ph n)
+(defn crack-ops (top px ph n:int)
   "`n` jagged dark FRACTURE seams evenly spaced across a (still-solid) paddle body: a
 2-row zig — one row inset left, the next inset right — so it reads as a crack, not a
 clean cut or a see-through gap."
@@ -2885,7 +2890,7 @@ the spinning ball, punching bigger as each second ticks over. Nil once released.
             row (max 0 (- (floor (/ rows 3)) (floor (/ scale 2)))))
         [[:text row col text {:bold true :scale scale :fg (hsv->rgb hue 0.35 1.0)}]]))))
 
-(defn render (st)
+(defn render (st:game-state)
   "The full frame as a render-op vector, composed back-to-front so later ops
 paint on top: the (maybe flashing) court fill and the bottom CROWD (a fixed
 backdrop), then the on-court layer — net, scores, comet trail, explosion
@@ -3310,7 +3315,7 @@ timeout advances the overlay's colour cycle."
     (after (wait-ms deadline) (pause-loop w st sel (+ tick 1) (next-deadline deadline)))))
 
 ;; ---- the victory finale (a match win) ----
-(defn win-explode (st)
+(defn win-explode (st:game-state -> game-state)
   "One understated detonation of the victory barrage: a modest burst at a random
 point on the COURT plus one in the STAND that tears a spectator out of their seat,
 with a gentle shake (no full-court flash). Threads the PRNG."
@@ -3342,7 +3347,7 @@ with a gentle shake (no full-court flash). Threads the PRNG."
   "The win-screen actions: `[label action]` — play again, or back to setup."
   [["RETRY" :retry] ["MAIN MENU" :menu]])
 
-(defn win-overlay (st sel)
+(defn win-overlay (st:game-state sel)
   "The winner banner + RETRY / MAIN MENU choices over the finale: the winning side's
 name huge in its colour, the final score, and the two actions (the highlighted one
 barred + brighter)."
@@ -3400,7 +3405,7 @@ the erupting crowd and all the explosion particles, with the winner banner +
 options on top."
   (into (render st) (win-overlay st sel)))
 
-(defn win-tick (st tick)
+(defn win-tick (st:game-state tick)
   "Advance the finale one frame WITHOUT stepping physics: fire a fresh detonation on
 the cadence (while the barrage lasts), then cycle the hue, age the particles +
 flash, decay the shake, keep the crowd cheer pegged, age the seat gaps, and fade
@@ -3576,10 +3581,9 @@ and lit in a rainbow hue over a soft bar, the rest small and dim."
         sel (get menu :sel)
         slot (max 4 (round (* rows 0.12)))
         start (round (* rows 0.44)))
-    (mapcat (range (count opts))
-      (fn (i)
-        (let (label (nth (nth opts i) 0)
-              active (= i sel)
+    (mapcat (seq/enumerate opts)
+      (fn ([i [label _]])
+        (let (active (= i sel)
               sc (if active
                    (min 16 (max 2 (round (* rows 0.075))))
                    (max 1 (round (* rows 0.05))))

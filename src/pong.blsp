@@ -3187,10 +3187,11 @@ catch-up ticks via `advance-frame`) and draws the result via `loop`."
   (receive
     ([:resize cols rows] (loop w (refit st cols rows) deadline))
     ([:key-up k] (loop-wait w (release-key st k) deadline))
-    (m (cond
-         (or (= m :close) (= m :ctrl-c)) (gui/close w)
-         (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
-         else (loop-wait w (press-key st m) deadline)))
+    (m
+      (cond
+        (or (= m :close) (= m :ctrl-c)) (gui/close w)
+        (pause-trigger? m) (pause-loop w st 0 0 (fresh-deadline))
+        else (loop-wait w (press-key st m) deadline)))
     (after (wait-ms deadline)
       (let ([st2 deadline2] (advance-frame st deadline))
         (if (get st2 :winner)
